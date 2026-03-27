@@ -1028,32 +1028,30 @@ void PLAT_setOverlay(const char* filename, const char* tag) {
         SDL_DestroyTexture(vid.overlay);
         vid.overlay = NULL;
     }
+
+	pthread_mutex_lock(&video_prep_mutex);
+
 	if (overlay_path) {
 		free(overlay_path);
 		overlay_path = NULL;
 	}
 
-	pthread_mutex_lock(&video_prep_mutex);
-	overlayUpdated=1;
-	pthread_mutex_unlock(&video_prep_mutex);
-
     if (!filename || strcmp(filename, "") == 0 || strcmp(filename, "None") == 0) {
 		overlay_path = strdup("");
         LOG_info("Skipping overlay update.\n");
-        return;
+    } else {
+        size_t path_len = strlen(OVERLAYS_FOLDER) + strlen(tag) + strlen(filename) + 4;
+        overlay_path = malloc(path_len);
+        if (!overlay_path) {
+            perror("malloc failed");
+        } else {
+            snprintf(overlay_path, path_len, "%s/%s/%s", OVERLAYS_FOLDER, tag, filename);
+            LOG_info("Overlay path set to: %s\n", overlay_path);
+        }
     }
 
-    size_t path_len = strlen(OVERLAYS_FOLDER) + strlen(tag) + strlen(filename) + 4; // +3 for slashes and null-terminator
-    overlay_path = malloc(path_len);
-
-    if (!overlay_path) {
-        perror("malloc failed");
-        return;
-    }
-
-    snprintf(overlay_path, path_len, "%s/%s/%s", OVERLAYS_FOLDER, tag, filename);
-    LOG_info("Overlay path set to: %s\n", overlay_path);
-
+	overlayUpdated=1;
+	pthread_mutex_unlock(&video_prep_mutex);
 }
 
 
@@ -1903,34 +1901,29 @@ int prepareFrameThread(void *data) {
 			pthread_mutex_unlock(&video_prep_mutex);
 		}
 
-		// Check overlayUpdated flag with mutex
+		// Check overlayUpdated flag and snapshot overlay_path under the mutex
 		pthread_mutex_lock(&video_prep_mutex);
 		int overlay_updated = overlayUpdated;
+		char *overlay_path_copy = (overlay_updated && overlay_path) ? strdup(overlay_path) : NULL;
 		pthread_mutex_unlock(&video_prep_mutex);
 
         if (overlay_updated) {
-
 			LOG_info("overlay updated\n");
-			if(overlay_path) {
-				SDL_Surface* tmp = IMG_Load(overlay_path);
-				SDL_Surface* converted = NULL;
+			SDL_Surface* converted = NULL;
+			if (overlay_path_copy) {
+				SDL_Surface* tmp = IMG_Load(overlay_path_copy);
+				free(overlay_path_copy);
 				if (tmp) {
 					converted = SDL_ConvertSurfaceFormat(tmp, SDL_PIXELFORMAT_RGBA32, 0);
 					SDL_FreeSurface(tmp);
 				}
-
-				pthread_mutex_lock(&video_prep_mutex);
-				frame_prep.loaded_overlay = converted;
-				frame_prep.overlay_ready = 1;
-				overlayUpdated=0;
-				pthread_mutex_unlock(&video_prep_mutex);
-			} else {
-				pthread_mutex_lock(&video_prep_mutex);
-				frame_prep.loaded_overlay = 0;
-				frame_prep.overlay_ready = 1;
-				overlayUpdated=0;
-				pthread_mutex_unlock(&video_prep_mutex);
 			}
+
+			pthread_mutex_lock(&video_prep_mutex);
+			frame_prep.loaded_overlay = converted;
+			frame_prep.overlay_ready = 1;
+			overlayUpdated=0;
+			pthread_mutex_unlock(&video_prep_mutex);
         }
 
         SDL_Delay(120);

@@ -207,39 +207,9 @@ typedef struct {
 	SND_Frame output_frames[400];
 } SND_ResamplerState;
 
-#define AUDIO_PACKET_QUEUE_SIZE 4
-typedef struct {
-	SND_Frame *frames;
-	size_t capacity;
-	size_t frame_count;
-	int fixed_rate;
-	double current_fps;
-	double frame_rate;
-} ThreadedAudioPacket;
-
-typedef struct {
-	pthread_t worker;
-	pthread_mutex_t mutex;
-	pthread_cond_t cond;
-	pthread_cond_t space_cond;
-	int enabled;
-	int running;
-	int stop_requested;
-	int queue_head;
-	int queue_tail;
-	int queue_count;
-	ThreadedAudioPacket packets[AUDIO_PACKET_QUEUE_SIZE];
-	SND_ResamplerState resampler;
-} ThreadedAudioContext;
-
 static SND_ResamplerState snd_resampler_direct = {
 	.sound_quality = 2,
 	.previous_ratio = 1.0,
-};
-static ThreadedAudioContext snd_thread = {
-	.mutex = PTHREAD_MUTEX_INITIALIZER,
-	.cond = PTHREAD_COND_INITIALIZER,
-	.space_cond = PTHREAD_COND_INITIALIZER,
 };
 
 ///////////////////////////////
@@ -521,11 +491,6 @@ double GFX_getCurrentFPS(void)
 	return GFX_getCurrentFPSInternal();
 }
 
-void GFX_setAsyncVideoTiming(int enabled)
-{
-	(void)enabled;
-}
-
 void GFX_recordFrameTiming(double frame_ms, double target_fps)
 {
 	double tempfps;
@@ -749,62 +714,6 @@ void GFX_sync(void)
 	{
 		if (frame_duration < FRAME_BUDGET)
 			SDL_Delay(FRAME_BUDGET - frame_duration);
-	}
-}
-
-void GFX_sync_fixed_rate(double target_fps)
-{
-	if (target_fps <= 0.0 || !isfinite(target_fps))
-		target_fps = SCREEN_FPS;
-
-	static int64_t frame_index = -1;
-	static int64_t first_frame_start_time = 0;
-	static double last_target_fps = 0.0;
-
-	int64_t perf_freq = SDL_GetPerformanceFrequency();
-	int64_t now = SDL_GetPerformanceCounter();
-
-	if (++frame_index == 0 || target_fps != last_target_fps)
-	{
-		frame_index = 0;
-		first_frame_start_time = now;
-		last_target_fps = target_fps;
-	}
-
-	int64_t frame_duration = perf_freq / target_fps;
-	int64_t time_of_frame = first_frame_start_time + frame_index * frame_duration;
-	int64_t offset = now - time_of_frame;
-	const int max_lost_frames = 2;
-
-	if (offset > 0)
-	{
-		if (offset > max_lost_frames * frame_duration)
-		{
-			frame_index = -1;
-			last_target_fps = 0.0;
-		}
-	}
-	else if (offset < 0)
-	{
-		if (offset < -max_lost_frames * frame_duration)
-		{
-			frame_index = -1;
-			last_target_fps = 0.0;
-		}
-		else
-		{
-			int64_t remaining = time_of_frame - now;
-			uint64_t time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
-			if (time_to_sleep_us > 2000)
-				SDL_Delay((uint32_t)((time_to_sleep_us - 1000) / 1000));
-			now = SDL_GetPerformanceCounter();
-			if (now < time_of_frame) {
-				remaining = time_of_frame - now;
-				time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
-				if (time_to_sleep_us > 0)
-					usleep((useconds_t)time_to_sleep_us);
-			}
-		}
 	}
 }
 
@@ -2428,8 +2337,6 @@ void SND_setQuality(int quality)
 	soundQuality = qualityLevels[quality];
 	snd_resampler_direct.sound_quality = soundQuality;
 	snd_resampler_direct.reset_src_state = 1;
-	snd_thread.resampler.sound_quality = soundQuality;
-	snd_thread.resampler.reset_src_state = 1;
 }
 // Pre-allocated buffers for resample_audio to avoid malloc/free per call
 // Max input: BATCH_SIZE (100) frames = 200 floats
@@ -2832,164 +2739,13 @@ static size_t SND_batchSamples_fixed_rate_internal(SND_ResamplerState *resampler
 	return frame_count;
 }
 
-static void *SND_threadWorker(void *unused)
-{
-	(void)unused;
-
-	for (;;)
-	{
-		ThreadedAudioPacket packet = {0};
-		int slot = -1;
-		pthread_mutex_lock(&snd_thread.mutex);
-		while (!snd_thread.stop_requested && snd_thread.queue_count == 0)
-			pthread_cond_wait(&snd_thread.cond, &snd_thread.mutex);
-
-		if (snd_thread.stop_requested)
-		{
-			pthread_mutex_unlock(&snd_thread.mutex);
-			break;
-		}
-
-		slot = snd_thread.queue_head;
-		packet = snd_thread.packets[slot];
-		pthread_mutex_unlock(&snd_thread.mutex);
-
-		if (packet.fixed_rate)
-			SND_batchSamples_fixed_rate_internal(&snd_thread.resampler, packet.frames, packet.frame_count);
-		else
-			SND_batchSamples_internal(&snd_thread.resampler, packet.frames, packet.frame_count,
-				packet.current_fps, packet.frame_rate);
-
-		perf.audio_thread_processed++;
-
-		pthread_mutex_lock(&snd_thread.mutex);
-		snd_thread.packets[slot].frame_count = 0;
-		snd_thread.queue_head = (snd_thread.queue_head + 1) % AUDIO_PACKET_QUEUE_SIZE;
-		snd_thread.queue_count--;
-		pthread_cond_signal(&snd_thread.space_cond);
-		pthread_mutex_unlock(&snd_thread.mutex);
-	}
-
-	return NULL;
-}
-
-static void SND_stopThreadedAudio(void)
-{
-	if (!snd_thread.running)
-		return;
-
-	pthread_mutex_lock(&snd_thread.mutex);
-	snd_thread.stop_requested = 1;
-	pthread_cond_broadcast(&snd_thread.cond);
-	pthread_cond_broadcast(&snd_thread.space_cond);
-	pthread_mutex_unlock(&snd_thread.mutex);
-
-	pthread_join(snd_thread.worker, NULL);
-	snd_thread.running = 0;
-
-	pthread_mutex_lock(&snd_thread.mutex);
-	snd_thread.stop_requested = 0;
-	snd_thread.queue_head = 0;
-	snd_thread.queue_tail = 0;
-	snd_thread.queue_count = 0;
-	for (int i = 0; i < AUDIO_PACKET_QUEUE_SIZE; i++)
-		snd_thread.packets[i].frame_count = 0;
-	pthread_mutex_unlock(&snd_thread.mutex);
-
-	SND_destroyResamplerState(&snd_thread.resampler);
-}
-
-static void SND_startThreadedAudio(void)
-{
-	if (!snd.initialized || !snd_thread.enabled || snd_thread.running)
-		return;
-
-	snd_thread.resampler.sound_quality = soundQuality;
-	snd_thread.resampler.reset_src_state = 1;
-	if (pthread_create(&snd_thread.worker, NULL, SND_threadWorker, NULL) != 0)
-	{
-		LOG_error("Failed to start threaded audio worker\n");
-		return;
-	}
-
-	snd_thread.running = 1;
-}
-
-static size_t SND_enqueueThreadedSamples(const SND_Frame *frames, size_t frame_count, int fixed_rate)
-{
-	ThreadedAudioPacket *packet = NULL;
-
-	pthread_mutex_lock(&snd_thread.mutex);
-	while (snd_thread.queue_count >= AUDIO_PACKET_QUEUE_SIZE && !snd_thread.stop_requested)
-	{
-		perf.audio_thread_blocked++;
-		pthread_cond_wait(&snd_thread.space_cond, &snd_thread.mutex);
-	}
-
-	if (snd_thread.stop_requested)
-	{
-		pthread_mutex_unlock(&snd_thread.mutex);
-		return frame_count;
-	}
-
-	packet = &snd_thread.packets[snd_thread.queue_tail];
-	if (packet->capacity < frame_count)
-	{
-		SND_Frame *grown = realloc(packet->frames, frame_count * sizeof(SND_Frame));
-		if (!grown)
-		{
-			pthread_mutex_unlock(&snd_thread.mutex);
-			LOG_error("Failed to grow threaded audio packet buffer\n");
-			return frame_count;
-		}
-		packet->frames = grown;
-		packet->capacity = frame_count;
-	}
-
-	memcpy(packet->frames, frames, frame_count * sizeof(SND_Frame));
-	packet->frame_count = frame_count;
-	packet->fixed_rate = fixed_rate;
-	packet->current_fps = GFX_getCurrentFPSInternal();
-	packet->frame_rate = snd.frame_rate;
-
-	snd_thread.queue_tail = (snd_thread.queue_tail + 1) % AUDIO_PACKET_QUEUE_SIZE;
-	snd_thread.queue_count++;
-	perf.audio_thread_submitted++;
-	pthread_cond_signal(&snd_thread.cond);
-	pthread_mutex_unlock(&snd_thread.mutex);
-	return frame_count;
-}
-
-void SND_enableThreadedProcessing(bool enabled)
-{
-	snd_thread.enabled = enabled ? 1 : 0;
-	snd_resampler_direct.reset_src_state = 1;
-	snd_thread.resampler.reset_src_state = 1;
-	perf.audio_thread_submitted = 0;
-	perf.audio_thread_processed = 0;
-	perf.audio_thread_blocked = 0;
-	perf.audio_thread_dropped = 0;
-	if (!enabled)
-	{
-		SND_stopThreadedAudio();
-		return;
-	}
-
-	if (snd.initialized)
-		SND_startThreadedAudio();
-}
-
 size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 {
-	if (snd_thread.running)
-		return SND_enqueueThreadedSamples(frames, frame_count, 0);
 	return SND_batchSamples_internal(&snd_resampler_direct, frames, frame_count, GFX_getCurrentFPSInternal(), snd.frame_rate);
 }
 
 size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 {
-	if (snd_thread.running)
-		return SND_enqueueThreadedSamples(frames, frame_count, 1);
 	return SND_batchSamples_fixed_rate_internal(&snd_resampler_direct, frames, frame_count);
 }
 
@@ -3067,10 +2823,6 @@ void SND_init(double sample_rate, double frame_rate)
 	LOG_info("sample rate: %i (req) %i (rec) [samples %i]\n", snd.sample_rate_in, snd.sample_rate_out, SAMPLES);
 	snd.initialized = 1;
 	snd_resampler_direct.sound_quality = soundQuality;
-	snd_thread.resampler.sound_quality = soundQuality;
-	if (snd_thread.enabled)
-		SND_startThreadedAudio();
-
 }
 
 void SND_quit(void)
@@ -3081,7 +2833,6 @@ void SND_quit(void)
 		return;
 	}
 
-	SND_stopThreadedAudio();
 	SND_pauseAudio(true);
 
 #if defined(USE_SDL2)
@@ -3103,13 +2854,6 @@ void SND_quit(void)
 	}
 
 	SND_destroyResamplerState(&snd_resampler_direct);
-	for (int i = 0; i < AUDIO_PACKET_QUEUE_SIZE; i++)
-	{
-		free(snd_thread.packets[i].frames);
-		snd_thread.packets[i].frames = NULL;
-		snd_thread.packets[i].capacity = 0;
-		snd_thread.packets[i].frame_count = 0;
-	}
 }
 
 void SND_resetAudio(double sample_rate, double frame_rate)

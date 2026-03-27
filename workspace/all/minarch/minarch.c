@@ -132,7 +132,6 @@ typedef struct {
 	unsigned height;
 	size_t pitch;
 	uint64_t frame_count;
-	int valid;
 	int reuse_last;
 	ThreadedVideoStateSnapshot state;
 } ThreadedVideoFrame;
@@ -153,10 +152,6 @@ typedef struct {
 	uint32_t reset_generation;
 	uint32_t applied_reset_generation;
 	ThreadedVideoFrame frames[2];
-	unsigned last_width;
-	unsigned last_height;
-	int last_valid;
-	uint64_t last_presented_frame;
 	uint32_t last_flip_time;
 	uint64_t last_present_counter;
 	int64_t sync_frame_index;
@@ -3182,7 +3177,6 @@ static void Config_syncFrontend(char* key, int value) {
 	else if (exactMatch(key,config.frontend.options[FE_OPT_THREADED_VIDEO].key)) {
 		threaded_video_enabled = value;
 		i = FE_OPT_THREADED_VIDEO;
-		SND_enableThreadedProcessing(false);
 		if (core.initialized && !show_menu) {
 			if (threaded_video_enabled)
 				ThreadedVideo_start();
@@ -6203,10 +6197,6 @@ static void ThreadedVideo_renderFrame(ThreadedVideoFrame *frame) {
 	}
 
 	perf.video_thread_presented++;
-	threaded_video.last_presented_frame = frame->frame_count;
-	threaded_video.last_width = frame->width;
-	threaded_video.last_height = frame->height;
-	threaded_video.last_valid = 1;
 }
 
 static void *ThreadedVideo_worker(void *unused) {
@@ -6221,7 +6211,7 @@ static void *ThreadedVideo_worker(void *unused) {
 			   (threaded_video.paused || threaded_video.pending_index == -1)) {
 			if (has_context) {
 				pthread_mutex_unlock(&threaded_video.mutex);
-				GFX_releaseGLContext();
+				PLAT_releaseGLContext();
 				pthread_mutex_lock(&threaded_video.mutex);
 				has_context = 0;
 				threaded_video.worker_has_context = 0;
@@ -6241,16 +6231,24 @@ static void *ThreadedVideo_worker(void *unused) {
 			threaded_video.worker_has_context = 0;
 			pthread_mutex_unlock(&threaded_video.mutex);
 			if (has_context)
-				GFX_releaseGLContext();
+				PLAT_releaseGLContext();
 			break;
 		}
 
 		if (!has_context) {
 			pthread_mutex_unlock(&threaded_video.mutex);
-			GFX_acquireGLContext();
+			PLAT_acquireGLContext();
 			pthread_mutex_lock(&threaded_video.mutex);
 			has_context = 1;
 			threaded_video.worker_has_context = 1;
+			/*
+			 * State may have changed while we dropped the mutex to acquire the
+			 * GL context (e.g. pause_for_ui cleared pending_index). Re-enter
+			 * the outer loop so the idle path can handle cleanup correctly.
+			 */
+			if (threaded_video.stop_requested || threaded_video.paused ||
+				threaded_video.pending_index == -1)
+				continue;
 		}
 
 			frame_index = threaded_video.pending_index;
@@ -6276,7 +6274,7 @@ static void ThreadedVideo_start(void) {
 	if (!threaded_video_enabled || threaded_video.running)
 		return;
 
-	GFX_releaseGLContext();
+	PLAT_releaseGLContext();
 	pthread_mutex_lock(&threaded_video.mutex);
 	threaded_video.stop_requested = 0;
 	threaded_video.paused = 0;
@@ -6296,7 +6294,7 @@ static void ThreadedVideo_start(void) {
 	perf.video_thread_blocked = 0;
 	if (pthread_create(&threaded_video.worker, NULL, ThreadedVideo_worker, NULL) != 0) {
 		LOG_error("Failed to start threaded video worker\n");
-		GFX_acquireGLContext();
+		PLAT_acquireGLContext();
 		return;
 	}
 	threaded_video.running = 1;
@@ -6321,7 +6319,7 @@ static void ThreadedVideo_stop(void) {
 	threaded_video.worker_has_context = 0;
 	threaded_video.paused = 0;
 	ThreadedVideo_reset_timing();
-	GFX_acquireGLContext();
+	PLAT_acquireGLContext();
 }
 
 static void ThreadedVideo_pause_for_ui(void) {
@@ -6335,14 +6333,14 @@ static void ThreadedVideo_pause_for_ui(void) {
 	while (threaded_video.worker_busy || threaded_video.worker_has_context)
 		pthread_cond_wait(&threaded_video.idle_cond, &threaded_video.mutex);
 	pthread_mutex_unlock(&threaded_video.mutex);
-	GFX_acquireGLContext();
+	PLAT_acquireGLContext();
 }
 
 static void ThreadedVideo_resume_from_ui(void) {
 	if (!threaded_video.running || quit)
 		return;
 
-	GFX_releaseGLContext();
+	PLAT_releaseGLContext();
 	pthread_mutex_lock(&threaded_video.mutex);
 	threaded_video.paused = 0;
 	ThreadedVideo_reset_timing();
@@ -6414,34 +6412,27 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 		}
 
 		if (state.fast_forward && threaded_video.pending_index != -1) {
+			/* Fast-forward: overwrite the already-queued slot in place.
+			 * pending_index is already set; keep the mutex and copy here
+			 * to prevent the worker from picking up a half-written frame. */
 			slot = threaded_video.pending_index;
 			perf.video_thread_dropped++;
-		} else if (threaded_video.inflight_index != -1) {
-			slot = 1 - threaded_video.inflight_index;
-			threaded_video.pending_index = slot;
-		} else {
-			slot = threaded_video.next_slot;
-			threaded_video.pending_index = slot;
-			threaded_video.next_slot = 1 - threaded_video.next_slot;
-		}
-
-		frame = &threaded_video.frames[slot];
-		frame->reuse_last = data ? 0 : 1;
-		frame->state = state;
-		frame->width = width;
-		frame->height = height;
-		frame->pitch = pitch;
-		frame->frame_count = perf.video_thread_submitted + 1;
-		frame->valid = 1;
-		frame->data_size = data ? bytes : 0;
+			frame = &threaded_video.frames[slot];
+			frame->reuse_last = data ? 0 : 1;
+			frame->state = state;
+			frame->width = width;
+			frame->height = height;
+			frame->pitch = pitch;
+			frame->frame_count = perf.video_thread_submitted + 1;
+			frame->data_size = data ? bytes : 0;
 			if (data) {
 				if (frame->capacity < bytes) {
 					uint8_t *grown = realloc(frame->buffer, bytes);
 					if (!grown) {
 						pthread_mutex_unlock(&threaded_video.mutex);
-					LOG_error("Failed to grow threaded video frame buffer\n");
-					return;
-				}
+						LOG_error("Failed to grow threaded video frame buffer\n");
+						return;
+					}
 					frame->buffer = grown;
 					frame->capacity = bytes;
 				}
@@ -6452,6 +6443,55 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 			pthread_mutex_unlock(&threaded_video.mutex);
 			return;
 		}
+
+		/* Normal path: select the slot but do NOT mark it pending yet —
+		 * we will release the mutex, do the copy, then re-acquire and commit. */
+		if (threaded_video.inflight_index != -1) {
+			slot = 1 - threaded_video.inflight_index;
+		} else {
+			slot = threaded_video.next_slot;
+			threaded_video.next_slot = 1 - threaded_video.next_slot;
+		}
+
+		frame = &threaded_video.frames[slot];
+		frame->reuse_last = data ? 0 : 1;
+		frame->state = state;
+		frame->width = width;
+		frame->height = height;
+		frame->pitch = pitch;
+		frame->frame_count = perf.video_thread_submitted + 1;
+		frame->data_size = data ? bytes : 0;
+
+		/* Grow the buffer while we still hold the mutex (rare). */
+		if (data && frame->capacity < bytes) {
+			uint8_t *grown = realloc(frame->buffer, bytes);
+			if (!grown) {
+				pthread_mutex_unlock(&threaded_video.mutex);
+				LOG_error("Failed to grow threaded video frame buffer\n");
+				return;
+			}
+			frame->buffer = grown;
+			frame->capacity = bytes;
+		}
+		pthread_mutex_unlock(&threaded_video.mutex);
+
+		/* Copy frame data without holding the mutex. The slot is safe to
+		 * write: the worker only accesses a slot after pending_index is set,
+		 * which we haven't done yet. */
+		if (data)
+			memcpy(frame->buffer, data, bytes);
+
+		pthread_mutex_lock(&threaded_video.mutex);
+		if (threaded_video.stop_requested || threaded_video.paused) {
+			pthread_mutex_unlock(&threaded_video.mutex);
+			return;
+		}
+		threaded_video.pending_index = slot;
+		perf.video_thread_submitted++;
+		pthread_cond_signal(&threaded_video.cond);
+		pthread_mutex_unlock(&threaded_video.mutex);
+		return;
+	}
 
 	// Allocate RGBA buffer if needed
 	if (!rgbaData || rgbaDataSize != width * height) {
@@ -9556,7 +9596,6 @@ int main(int argc , char* argv[]) {
 	// Mute audio during startup to avoid pops (InitSettings would be logical, but too late)
 	SND_overrideMute(1);
 	SND_init(core.sample_rate, core.fps);
-	SND_enableThreadedProcessing(false);
 	SND_registerDeviceWatcher(onAudioSinkChanged);
 	InitSettings(); // after we initialize audio
 	Menu_init();

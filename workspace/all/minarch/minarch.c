@@ -6226,6 +6226,13 @@ static void *ThreadedVideo_worker(void *unused) {
 				has_context = 0;
 				threaded_video.worker_has_context = 0;
 				pthread_cond_broadcast(&threaded_video.idle_cond);
+				/*
+				 * Re-check the queue state before sleeping. A producer can publish a
+				 * frame while we dropped the mutex to release GL ownership; if we go
+				 * straight into pthread_cond_wait() here, that wakeup is lost and the
+				 * pending frame remains stuck forever.
+				 */
+				continue;
 			}
 			pthread_cond_wait(&threaded_video.cond, &threaded_video.mutex);
 		}

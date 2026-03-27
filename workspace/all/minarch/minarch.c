@@ -6344,7 +6344,6 @@ static void ThreadedVideo_resume_from_ui(void) {
 	pthread_mutex_lock(&threaded_video.mutex);
 	threaded_video.paused = 0;
 	ThreadedVideo_reset_timing();
-	threaded_video.reset_generation++;
 	pthread_cond_broadcast(&threaded_video.cond);
 	pthread_mutex_unlock(&threaded_video.mutex);
 }
@@ -9346,7 +9345,9 @@ static void Menu_loop(void) {
 	if(menu.bitmap) SDL_FreeSurface(menu.bitmap);
 	PAD_reset();
 
-	GFX_clearAll();
+	int resume_threaded_gameplay = !quit && threaded_video_enabled;
+	if (!resume_threaded_gameplay)
+		GFX_clearAll();
 	
 	int count = 0;
 	char** overlayList = config.frontend.options[FE_OPT_OVERLAY].values;
@@ -9363,7 +9364,8 @@ static void Menu_loop(void) {
 		}
 		GFX_setEffect(screen_effect);
 
-		GFX_clear(screen);
+		if (!resume_threaded_gameplay)
+			GFX_clear(screen);
 
 		setOverclock(overclock); // restore overclock value
 		if (rumble_strength) VIB_setStrength(rumble_strength);

@@ -99,6 +99,14 @@ typedef struct {
     int frame_drops;
     double avg_frame_ms;
     double max_frame_ms;
+    int video_thread_submitted;
+    int video_thread_presented;
+    int video_thread_dropped;
+    int video_thread_blocked;
+    int audio_thread_submitted;
+    int audio_thread_processed;
+    int audio_thread_blocked;
+    int audio_thread_dropped;
 } PerfProfile;
 
 extern PerfProfile perf;
@@ -280,6 +288,8 @@ SDL_Surface* GFX_init(int mode);
 #define GFX_flipHidden PLAT_flipHidden //(void)
 #define GFX_GL_screenCapture PLAT_GL_screenCapture //(void)
 #define GFX_setClearColor PLAT_setClearColor //(uint32_t color)
+#define GFX_acquireGLContext PLAT_acquireGLContext //(void)
+#define GFX_releaseGLContext PLAT_releaseGLContext //(void)
 
 void GFX_setMode(int mode);
 int GFX_hdmiChanged(void);
@@ -292,10 +302,15 @@ void GFX_startFrame(void);
 void GFX_flip(SDL_Surface* screen);
 void PLAT_flipHidden();
 void GFX_flip_fixed_rate(SDL_Surface* screen, double target_fps); // if target_fps is 0, then use the native screen FPS
+void GFX_sync_fixed_rate(double target_fps);
+void GFX_recordFrameTiming(double frame_ms, double target_fps);
+void GFX_resetTimingStats(void);
 #define GFX_supportsOverscan PLAT_supportsOverscan // (void)
 void GFX_sync(void); // call this to maintain 60fps when not calling GFX_flip() this frame
 void GFX_delay(void); // gfx_sync() is only for everywhere where there is no audio buffer to rely on for delaying, stupid so doing gfx_delay() for like waiting for input loop in binding menu. Need to remove gfx_sync() everwhere eventually
 void GFX_quit(void);
+double GFX_getCurrentFPS(void);
+void GFX_setAsyncVideoTiming(int enabled);
 
 enum {
 	VSYNC_OFF = 0,
@@ -414,6 +429,7 @@ void SND_quit(void);
 void SND_resetAudio(double sample_rate, double frame_rate);
 void SND_pauseAudio(bool paused);
 void SND_setQuality(int quality);
+void SND_enableThreadedProcessing(bool enabled);
 
 // watch audio device changes
 typedef enum {
@@ -659,6 +675,8 @@ void PLAT_blitRenderer(GFX_Renderer* renderer);
 void PLAT_flip(SDL_Surface* screen, int sync);
 void PLAT_GL_Swap();
 void GFX_GL_Swap();
+void PLAT_acquireGLContext(void);
+void PLAT_releaseGLContext(void);
 unsigned char* PLAT_GL_screenCapture(int* outWidth, int* outHeight);
 void PLAT_setClearColor(uint32_t color);
 void PLAT_GPU_Flip();

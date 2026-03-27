@@ -197,11 +197,57 @@ static struct SND_Context
 	int device_id; // SDL device id
 } snd = {0};
 
+typedef struct {
+	int sound_quality;
+	int reset_src_state;
+	double previous_ratio;
+	SRC_STATE *src_state;
+	float input_buffer[100 * 2];
+	float output_buffer[400 * 2];
+	SND_Frame output_frames[400];
+} SND_ResamplerState;
+
+#define AUDIO_PACKET_QUEUE_SIZE 4
+typedef struct {
+	SND_Frame *frames;
+	size_t capacity;
+	size_t frame_count;
+	int fixed_rate;
+	double current_fps;
+	double frame_rate;
+} ThreadedAudioPacket;
+
+typedef struct {
+	pthread_t worker;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	pthread_cond_t space_cond;
+	int enabled;
+	int running;
+	int stop_requested;
+	int queue_head;
+	int queue_tail;
+	int queue_count;
+	ThreadedAudioPacket packets[AUDIO_PACKET_QUEUE_SIZE];
+	SND_ResamplerState resampler;
+} ThreadedAudioContext;
+
+static SND_ResamplerState snd_resampler_direct = {
+	.sound_quality = 2,
+	.previous_ratio = 1.0,
+};
+static ThreadedAudioContext snd_thread = {
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER,
+	.space_cond = PTHREAD_COND_INITIALIZER,
+};
+
 ///////////////////////////////
 
 static int _;
 
 static double current_fps = SCREEN_FPS;
+static pthread_mutex_t current_fps_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int fps_counter = 0;
 PerfProfile perf = {0};
 
@@ -450,6 +496,93 @@ static int fps_buffer_index = 0;
 void GFX_startFrame(void)
 {
 	frame_start = SDL_GetTicks();
+	if (!per_frame_start)
+		per_frame_start = SDL_GetPerformanceCounter();
+}
+
+static double GFX_getCurrentFPSInternal(void)
+{
+	double fps;
+	pthread_mutex_lock(&current_fps_mutex);
+	fps = current_fps;
+	pthread_mutex_unlock(&current_fps_mutex);
+	return fps;
+}
+
+static void GFX_setCurrentFPSInternal(double fps)
+{
+	pthread_mutex_lock(&current_fps_mutex);
+	current_fps = fps;
+	pthread_mutex_unlock(&current_fps_mutex);
+}
+
+double GFX_getCurrentFPS(void)
+{
+	return GFX_getCurrentFPSInternal();
+}
+
+void GFX_setAsyncVideoTiming(int enabled)
+{
+	(void)enabled;
+}
+
+void GFX_recordFrameTiming(double frame_ms, double target_fps)
+{
+	double tempfps;
+	double target_ms;
+
+	if (target_fps <= 0.0 || !isfinite(target_fps))
+		target_fps = SCREEN_FPS;
+
+	target_ms = 1000.0 / target_fps;
+	if (!isfinite(frame_ms) || frame_ms <= 0.0)
+		frame_ms = target_ms;
+
+	tempfps = 1000.0 / frame_ms;
+	if (!isfinite(tempfps) || tempfps <= 0.0)
+		tempfps = target_fps;
+
+	perf.jitter = fabs(frame_ms - target_ms);
+	if (frame_ms > target_ms * 1.1)
+		perf.frame_drops++;
+
+	fps_buffer[fps_buffer_index] = tempfps;
+	frame_time_buffer[fps_buffer_index] = frame_ms;
+	fps_buffer_index = (fps_buffer_index + 1) % FPS_BUFFER_SIZE;
+
+	if (fps_counter++ > 100)
+	{
+		double average_fps = 0.0;
+		double avg_ft = 0.0;
+		double max_ft = 0.0;
+		int fpsbuffersize = MIN(fps_counter, FPS_BUFFER_SIZE);
+		for (int i = 0; i < fpsbuffersize; i++)
+		{
+			average_fps += fps_buffer[i];
+			avg_ft += frame_time_buffer[i];
+			if (frame_time_buffer[i] > max_ft)
+				max_ft = frame_time_buffer[i];
+		}
+		average_fps /= fpsbuffersize;
+		avg_ft /= fpsbuffersize;
+		GFX_setCurrentFPSInternal(average_fps);
+		perf.fps = average_fps;
+		perf.avg_frame_ms = avg_ft;
+		perf.max_frame_ms = max_ft;
+	}
+	else
+	{
+		GFX_setCurrentFPSInternal(target_fps);
+		perf.fps = target_fps;
+		perf.avg_frame_ms = target_ms;
+		perf.max_frame_ms = target_ms;
+	}
+}
+
+void GFX_resetTimingStats(void)
+{
+	fps_counter = 0;
+	fps_buffer_index = 0;
 }
 
 uint32_t GFX_extract_average_color(const void *data, unsigned width, unsigned height, size_t pitch)
@@ -573,50 +706,11 @@ void GFX_flip(SDL_Surface *screen)
 	}
 	PLAT_flip(screen, 0);
 
-	perf.fps = current_fps;
-	fps_counter++;
-
 	uint64_t performance_frequency = SDL_GetPerformanceFrequency();
 	uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
 	double elapsed_time_s = (double)frame_duration / performance_frequency;
-	double tempfps = 1.0 / elapsed_time_s;
-
-	// Stats logic
 	double frame_ms = elapsed_time_s * 1000.0;
-	double target_ms = 1000.0 / SCREEN_FPS;
-	perf.jitter = fabs(frame_ms - target_ms);
-	
-	if (frame_ms > target_ms * 1.1) {
-		perf.frame_drops++;
-		//LOG_warn("GFX_flip: Frame drop detected! Frame time: %.2f ms (target: %.2f ms)\n", frame_ms, target_ms);
-	}
-
-	if (tempfps < SCREEN_FPS * 0.8 || tempfps > SCREEN_FPS * 1.2)
-		tempfps = SCREEN_FPS;
-
-	fps_buffer[fps_buffer_index] = tempfps;
-	frame_time_buffer[fps_buffer_index] = frame_ms;
-	fps_buffer_index = (fps_buffer_index + 1) % FPS_BUFFER_SIZE;
-	// give it a little bit to stabilize and then use, meanwhile the buffer will
-	// cover it
-	if (fps_counter > 100)
-	{
-		double average_fps = 0.0;
-		double avg_ft = 0.0;
-		double max_ft = 0.0;
-		int fpsbuffersize = MIN(fps_counter, FPS_BUFFER_SIZE);
-		for (int i = 0; i < fpsbuffersize; i++)
-		{
-			average_fps += fps_buffer[i];
-			avg_ft += frame_time_buffer[i];
-			if (frame_time_buffer[i] > max_ft) max_ft = frame_time_buffer[i];
-		}
-		average_fps /= fpsbuffersize;
-		avg_ft /= fpsbuffersize;
-		current_fps = average_fps;
-		perf.avg_frame_ms = avg_ft;
-		perf.max_frame_ms = max_ft;
-	}
+	GFX_recordFrameTiming(frame_ms, SCREEN_FPS);
 
 	per_frame_start = SDL_GetPerformanceCounter();
 }
@@ -631,50 +725,11 @@ void GFX_GL_Swap()
 	}
 	PLAT_GL_Swap();
 
-	perf.fps = current_fps;
-	fps_counter++;
-
 	uint64_t performance_frequency = SDL_GetPerformanceFrequency();
 	uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
 	double elapsed_time_s = (double)frame_duration / performance_frequency;
-	double tempfps = 1.0 / elapsed_time_s;
-
-	// Stats logic
 	double frame_ms = elapsed_time_s * 1000.0;
-	double target_ms = 1000.0 / SCREEN_FPS;
-	perf.jitter = fabs(frame_ms - target_ms);
-	
-	if (frame_ms > target_ms * 1.1) {
-		perf.frame_drops++;
-		//LOG_warn("GFX_GL_Swap: Frame drop detected! Frame time: %.2f ms (target: %.2f ms)\n", frame_ms, target_ms);
-	}
-
-	if (tempfps < SCREEN_FPS * 0.8 || tempfps > SCREEN_FPS * 1.2)
-		tempfps = SCREEN_FPS;
-
-	fps_buffer[fps_buffer_index] = tempfps;
-	frame_time_buffer[fps_buffer_index] = frame_ms;
-	fps_buffer_index = (fps_buffer_index + 1) % FPS_BUFFER_SIZE;
-	// give it a little bit to stabilize and then use, meanwhile the buffer will
-	// cover it
-	if (fps_counter > 100)
-	{
-		double average_fps = 0.0;
-		double avg_ft = 0.0;
-		double max_ft = 0.0;
-		int fpsbuffersize = MIN(fps_counter, FPS_BUFFER_SIZE);
-		for (int i = 0; i < fpsbuffersize; i++)
-		{
-			average_fps += fps_buffer[i];
-			avg_ft += frame_time_buffer[i];
-			if (frame_time_buffer[i] > max_ft) max_ft = frame_time_buffer[i];
-		}
-		average_fps /= fpsbuffersize;
-		avg_ft /= fpsbuffersize;
-		current_fps = average_fps;
-		perf.avg_frame_ms = avg_ft;
-		perf.max_frame_ms = max_ft;
-	}
+	GFX_recordFrameTiming(frame_ms, SCREEN_FPS);
 
 	per_frame_start = SDL_GetPerformanceCounter();
 }
@@ -697,11 +752,66 @@ void GFX_sync(void)
 	}
 }
 
+void GFX_sync_fixed_rate(double target_fps)
+{
+	if (target_fps <= 0.0 || !isfinite(target_fps))
+		target_fps = SCREEN_FPS;
+
+	static int64_t frame_index = -1;
+	static int64_t first_frame_start_time = 0;
+	static double last_target_fps = 0.0;
+
+	int64_t perf_freq = SDL_GetPerformanceFrequency();
+	int64_t now = SDL_GetPerformanceCounter();
+
+	if (++frame_index == 0 || target_fps != last_target_fps)
+	{
+		frame_index = 0;
+		first_frame_start_time = now;
+		last_target_fps = target_fps;
+	}
+
+	int64_t frame_duration = perf_freq / target_fps;
+	int64_t time_of_frame = first_frame_start_time + frame_index * frame_duration;
+	int64_t offset = now - time_of_frame;
+	const int max_lost_frames = 2;
+
+	if (offset > 0)
+	{
+		if (offset > max_lost_frames * frame_duration)
+		{
+			frame_index = -1;
+			last_target_fps = 0.0;
+		}
+	}
+	else if (offset < 0)
+	{
+		if (offset < -max_lost_frames * frame_duration)
+		{
+			frame_index = -1;
+			last_target_fps = 0.0;
+		}
+		else
+		{
+			int64_t remaining = time_of_frame - now;
+			uint64_t time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+			if (time_to_sleep_us > 2000)
+				SDL_Delay((uint32_t)((time_to_sleep_us - 1000) / 1000));
+			now = SDL_GetPerformanceCounter();
+			if (now < time_of_frame) {
+				remaining = time_of_frame - now;
+				time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+				if (time_to_sleep_us > 0)
+					usleep((useconds_t)time_to_sleep_us);
+			}
+		}
+	}
+}
+
 void GFX_flip_fixed_rate(SDL_Surface *screen, double target_fps)
 {
 	if (target_fps == 0.0)
 		target_fps = SCREEN_FPS;
-	double frame_budget_ms = 1000.0 / target_fps;
 
 	static int64_t frame_index = -1;
 	static int64_t first_frame_start_time = 0;
@@ -748,69 +858,24 @@ void GFX_flip_fixed_rate(SDL_Surface *screen, double target_fps)
 		}
 		else if (offset < 0)
 		{
-			useconds_t time_to_sleep_us = (useconds_t)((time_of_frame - now) * 1e6 / perf_freq);
-
-			// The OS scheduling algorithm cannot guarantee that
-			// the sleep will last the exact amount of requested time.
-			// We sleep as much as we can using the OS primitive.
-			const useconds_t min_waiting_time = 2000;
-			if (time_to_sleep_us > min_waiting_time)
-			{
-				usleep(time_to_sleep_us - min_waiting_time);
-			}
-
-			while (SDL_GetPerformanceCounter() < time_of_frame)
-			{
-				// nothing...
+			int64_t remaining = time_of_frame - now;
+			uint64_t time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+			if (time_to_sleep_us > 2000)
+				SDL_Delay((uint32_t)((time_to_sleep_us - 1000) / 1000));
+			now = SDL_GetPerformanceCounter();
+			if (now < time_of_frame) {
+				remaining = time_of_frame - now;
+				time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+				if (time_to_sleep_us > 0)
+					usleep((useconds_t)time_to_sleep_us);
 			}
 		}
 	}
 	PLAT_GL_Swap();
 
 	double elapsed_time_s = (double)(SDL_GetPerformanceCounter() - per_frame_start) / perf_freq;
-	double tempfps = 1.0 / elapsed_time_s;
-
-	// Stats logic
 	double frame_ms = elapsed_time_s * 1000.0;
-	double target_ms = 1000.0 / target_fps;
-	perf.jitter = fabs(frame_ms - target_ms);
-	
-	if (frame_ms > target_ms * 1.1) {
-		perf.frame_drops++;
-		//LOG_warn("GFX_flip_fixed_rate: Frame drop detected! Frame time: %.2f ms (target: %.2f ms)\n", frame_ms, target_ms);
-	}
-
-	fps_buffer[fps_buffer_index] = tempfps;
-	frame_time_buffer[fps_buffer_index] = frame_ms;
-	fps_buffer_index = (fps_buffer_index + 1) % FPS_BUFFER_SIZE;
-	// give it a little bit to stabilize and then use, meanwhile the buffer will
-	// cover it
-	if (fps_counter++ > 100)
-	{
-		double average_fps = 0.0;
-		double avg_ft = 0.0;
-		double max_ft = 0.0;
-		int fpsbuffersize = MIN(fps_counter, FPS_BUFFER_SIZE);
-		for (int i = 0; i < fpsbuffersize; i++)
-		{
-			average_fps += fps_buffer[i];
-			avg_ft += frame_time_buffer[i];
-			if (frame_time_buffer[i] > max_ft) max_ft = frame_time_buffer[i];
-		}
-		average_fps /= fpsbuffersize;
-		avg_ft /= fpsbuffersize;
-		current_fps = average_fps;
-		perf.fps = current_fps;
-		perf.avg_frame_ms = avg_ft;
-		perf.max_frame_ms = max_ft;
-	}
-	else
-	{
-		current_fps = target_fps;
-		perf.fps = target_fps;
-		perf.avg_frame_ms = 1000.0 / target_fps;
-		perf.max_frame_ms = perf.avg_frame_ms;
-	}
+	GFX_recordFrameTiming(frame_ms, target_fps);
 	per_frame_start = SDL_GetPerformanceCounter();
 }
 
@@ -2341,53 +2406,55 @@ static void SND_resizeBuffer(void)
 #endif
 }
 static int soundQuality = 2;
-static int resetSrcState = 0;
-static double resample_previous_ratio = 1.0;
-static SRC_STATE *resample_src_state = NULL;
 
-static void SND_destroyResampler(void)
+static void SND_destroyResamplerState(SND_ResamplerState *state)
 {
-	if (resample_src_state)
+	if (!state)
+		return;
+
+	if (state->src_state)
 	{
-		src_delete(resample_src_state);
-		resample_src_state = NULL;
+		src_delete(state->src_state);
+		state->src_state = NULL;
 	}
 
-	resample_previous_ratio = 1.0;
-	resetSrcState = 0;
+	state->previous_ratio = 1.0;
+	state->reset_src_state = 0;
 }
 
 void SND_setQuality(int quality)
 {
 	LOG_info("Set sound quality\n");
 	soundQuality = qualityLevels[quality];
-	resetSrcState = 1;
+	snd_resampler_direct.sound_quality = soundQuality;
+	snd_resampler_direct.reset_src_state = 1;
+	snd_thread.resampler.sound_quality = soundQuality;
+	snd_thread.resampler.reset_src_state = 1;
 }
 // Pre-allocated buffers for resample_audio to avoid malloc/free per call
 // Max input: BATCH_SIZE (100) frames = 200 floats
 // Max output: BATCH_SIZE * max_ratio (1.5) * max_sample_rate_ratio (~2) + margin = 400 frames = 800 floats
 #define RESAMPLE_MAX_INPUT_FRAMES BATCH_SIZE
 #define RESAMPLE_MAX_OUTPUT_FRAMES 400
-static float resample_input_buffer[RESAMPLE_MAX_INPUT_FRAMES * 2];
-static float resample_output_buffer[RESAMPLE_MAX_OUTPUT_FRAMES * 2];
-static SND_Frame resample_output_frames[RESAMPLE_MAX_OUTPUT_FRAMES];
 
-ResampledFrames resample_audio(const SND_Frame *input_frames,
+static ResampledFrames resample_audio(SND_ResamplerState *state,
+							   const SND_Frame *input_frames,
 							   int input_frame_count, int input_sample_rate,
 							   int output_sample_rate, double ratio)
 {
 	int error;
 	double final_ratio = ((double)output_sample_rate / input_sample_rate) * ratio;
 
-	if (resetSrcState)
+	if (state->reset_src_state)
 	{
-		SND_destroyResampler();
+		SND_destroyResamplerState(state);
 	}
 
-	if (!resample_src_state)
+	if (!state->src_state)
 	{
-		resample_src_state = src_new(soundQuality, 2, &error);
-		if (resample_src_state == NULL)
+		state->sound_quality = soundQuality;
+		state->src_state = src_new(state->sound_quality, 2, &error);
+		if (state->src_state == NULL)
 		{
 			fprintf(stderr, "Error initializing SRC state: %s\n",
 					src_strerror(error));
@@ -2395,15 +2462,15 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 		}
 	}
 
-	if (resample_previous_ratio != final_ratio)
+	if (state->previous_ratio != final_ratio)
 	{
-		if (src_set_ratio(resample_src_state, final_ratio) != 0)
+		if (src_set_ratio(state->src_state, final_ratio) != 0)
 		{
 			fprintf(stderr, "Error setting resampling ratio: %s\n",
-					src_strerror(src_error(resample_src_state)));
+					src_strerror(src_error(state->src_state)));
 			exit(1);
 		}
-		resample_previous_ratio = final_ratio;
+		state->previous_ratio = final_ratio;
 	}
 
 	int max_output_frames = (int)(input_frame_count * final_ratio + 1);
@@ -2415,8 +2482,8 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 				input_frame_count, max_output_frames);
 		exit(1);
 	}
-	float *input_buffer = resample_input_buffer;
-	float *output_buffer = resample_output_buffer;
+	float *input_buffer = state->input_buffer;
+	float *output_buffer = state->output_buffer;
 
 	for (int i = 0; i < input_frame_count; i++)
 	{
@@ -2432,17 +2499,17 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 		.src_ratio = final_ratio,
 		.end_of_input = 0};
 
-	if (src_process(resample_src_state, &src_data) != 0)
+	if (src_process(state->src_state, &src_data) != 0)
 	{
 		fprintf(stderr, "Error resampling: %s\n",
-				src_strerror(src_error(resample_src_state)));
+				src_strerror(src_error(state->src_state)));
 		exit(1);
 	}
 
 	int output_frame_count = src_data.output_frames_gen;
 
 	// Use pre-allocated static buffer for output frames
-	SND_Frame *output_frames = resample_output_frames;
+	SND_Frame *output_frames = state->output_frames;
 
 	for (int i = 0; i < output_frame_count; i++)
 	{
@@ -2518,7 +2585,9 @@ static SND_Frame tmpbuffer[BATCH_SIZE];
 static SND_Frame *unwritten_frames = NULL;
 static int unwritten_frame_count = 0;
 
-size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
+static size_t SND_batchSamples_internal(SND_ResamplerState *resampler,
+		const SND_Frame *frames, size_t frame_count, double fps_snapshot,
+		double frame_rate_snapshot)
 {
 	int framecount = (int)frame_count;
 	int consumed = 0;
@@ -2567,13 +2636,13 @@ size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 	perf.buffer_ms = tempdelay;
 
 	// do some checks
-	if (current_fps <= 0.0f || !isfinite(current_fps))
+	if (fps_snapshot <= 0.0f || !isfinite(fps_snapshot))
 	{
-		current_fps = 0.01f;
+		fps_snapshot = 0.01f;
 	}
-	if (!isfinite(snd.frame_rate) || snd.frame_rate <= 0.0f)
+	if (!isfinite(frame_rate_snapshot) || frame_rate_snapshot <= 0.0f)
 	{
-		snd.frame_rate = 60.0f;
+		frame_rate_snapshot = 60.0f;
 	}
 
 	float bufferadjustment = calculateBufferAdjustment(remaining_space, snd.frame_count*0.2, snd.frame_count*0.8, frame_count);
@@ -2583,7 +2652,7 @@ size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 		bufferadjustment = 0.0f;
 	}
 
-	float safe_ratio = snd.frame_rate / current_fps;
+	float safe_ratio = frame_rate_snapshot / fps_snapshot;
 	if (!isfinite(safe_ratio))
 	{
 		safe_ratio = 1.0f;
@@ -2602,7 +2671,7 @@ size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 	else if (ratio < 0.5)
 		ratio = 0.5;
 
-	perf.ratio = (ratio > 0.0) ? ratio : current_fps;
+	perf.ratio = (ratio > 0.0) ? ratio : fps_snapshot;
 
 	while (framecount > 0)
 	{
@@ -2616,7 +2685,7 @@ size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 		consumed += amount;
 		framecount -= amount;
 
-		ResampledFrames resampled = resample_audio(
+		ResampledFrames resampled = resample_audio(resampler,
 			tmpbuffer, amount, snd.sample_rate_in, snd.sample_rate_out, ratio);
 
 		pthread_mutex_lock(&audio_mutex);
@@ -2647,7 +2716,8 @@ enum
 	SND_FF_VERY_LATE
 };
 
-size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
+static size_t SND_batchSamples_fixed_rate_internal(SND_ResamplerState *resampler,
+		const SND_Frame *frames, size_t frame_count)
 {
 	static int current_mode = SND_FF_ON_TIME;
 	double ratio = 1.0;
@@ -2740,7 +2810,7 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 		consumed += amount;
 		framecount -= amount;
 
-		ResampledFrames resampled = resample_audio(
+		ResampledFrames resampled = resample_audio(resampler,
 			tmpbuffer, amount, snd.sample_rate_in, snd.sample_rate_out, ratio);
 
 		// Write resampled frames to the buffer
@@ -2760,6 +2830,167 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 
 	// Libretro expects input frames processed, not output frames written after resampling.
 	return frame_count;
+}
+
+static void *SND_threadWorker(void *unused)
+{
+	(void)unused;
+
+	for (;;)
+	{
+		ThreadedAudioPacket packet = {0};
+		int slot = -1;
+		pthread_mutex_lock(&snd_thread.mutex);
+		while (!snd_thread.stop_requested && snd_thread.queue_count == 0)
+			pthread_cond_wait(&snd_thread.cond, &snd_thread.mutex);
+
+		if (snd_thread.stop_requested)
+		{
+			pthread_mutex_unlock(&snd_thread.mutex);
+			break;
+		}
+
+		slot = snd_thread.queue_head;
+		packet = snd_thread.packets[slot];
+		pthread_mutex_unlock(&snd_thread.mutex);
+
+		if (packet.fixed_rate)
+			SND_batchSamples_fixed_rate_internal(&snd_thread.resampler, packet.frames, packet.frame_count);
+		else
+			SND_batchSamples_internal(&snd_thread.resampler, packet.frames, packet.frame_count,
+				packet.current_fps, packet.frame_rate);
+
+		perf.audio_thread_processed++;
+
+		pthread_mutex_lock(&snd_thread.mutex);
+		snd_thread.packets[slot].frame_count = 0;
+		snd_thread.queue_head = (snd_thread.queue_head + 1) % AUDIO_PACKET_QUEUE_SIZE;
+		snd_thread.queue_count--;
+		pthread_cond_signal(&snd_thread.space_cond);
+		pthread_mutex_unlock(&snd_thread.mutex);
+	}
+
+	return NULL;
+}
+
+static void SND_stopThreadedAudio(void)
+{
+	if (!snd_thread.running)
+		return;
+
+	pthread_mutex_lock(&snd_thread.mutex);
+	snd_thread.stop_requested = 1;
+	pthread_cond_broadcast(&snd_thread.cond);
+	pthread_cond_broadcast(&snd_thread.space_cond);
+	pthread_mutex_unlock(&snd_thread.mutex);
+
+	pthread_join(snd_thread.worker, NULL);
+	snd_thread.running = 0;
+
+	pthread_mutex_lock(&snd_thread.mutex);
+	snd_thread.stop_requested = 0;
+	snd_thread.queue_head = 0;
+	snd_thread.queue_tail = 0;
+	snd_thread.queue_count = 0;
+	for (int i = 0; i < AUDIO_PACKET_QUEUE_SIZE; i++)
+		snd_thread.packets[i].frame_count = 0;
+	pthread_mutex_unlock(&snd_thread.mutex);
+
+	SND_destroyResamplerState(&snd_thread.resampler);
+}
+
+static void SND_startThreadedAudio(void)
+{
+	if (!snd.initialized || !snd_thread.enabled || snd_thread.running)
+		return;
+
+	snd_thread.resampler.sound_quality = soundQuality;
+	snd_thread.resampler.reset_src_state = 1;
+	if (pthread_create(&snd_thread.worker, NULL, SND_threadWorker, NULL) != 0)
+	{
+		LOG_error("Failed to start threaded audio worker\n");
+		return;
+	}
+
+	snd_thread.running = 1;
+}
+
+static size_t SND_enqueueThreadedSamples(const SND_Frame *frames, size_t frame_count, int fixed_rate)
+{
+	ThreadedAudioPacket *packet = NULL;
+
+	pthread_mutex_lock(&snd_thread.mutex);
+	while (snd_thread.queue_count >= AUDIO_PACKET_QUEUE_SIZE && !snd_thread.stop_requested)
+	{
+		perf.audio_thread_blocked++;
+		pthread_cond_wait(&snd_thread.space_cond, &snd_thread.mutex);
+	}
+
+	if (snd_thread.stop_requested)
+	{
+		pthread_mutex_unlock(&snd_thread.mutex);
+		return frame_count;
+	}
+
+	packet = &snd_thread.packets[snd_thread.queue_tail];
+	if (packet->capacity < frame_count)
+	{
+		SND_Frame *grown = realloc(packet->frames, frame_count * sizeof(SND_Frame));
+		if (!grown)
+		{
+			pthread_mutex_unlock(&snd_thread.mutex);
+			LOG_error("Failed to grow threaded audio packet buffer\n");
+			return frame_count;
+		}
+		packet->frames = grown;
+		packet->capacity = frame_count;
+	}
+
+	memcpy(packet->frames, frames, frame_count * sizeof(SND_Frame));
+	packet->frame_count = frame_count;
+	packet->fixed_rate = fixed_rate;
+	packet->current_fps = GFX_getCurrentFPSInternal();
+	packet->frame_rate = snd.frame_rate;
+
+	snd_thread.queue_tail = (snd_thread.queue_tail + 1) % AUDIO_PACKET_QUEUE_SIZE;
+	snd_thread.queue_count++;
+	perf.audio_thread_submitted++;
+	pthread_cond_signal(&snd_thread.cond);
+	pthread_mutex_unlock(&snd_thread.mutex);
+	return frame_count;
+}
+
+void SND_enableThreadedProcessing(bool enabled)
+{
+	snd_thread.enabled = enabled ? 1 : 0;
+	snd_resampler_direct.reset_src_state = 1;
+	snd_thread.resampler.reset_src_state = 1;
+	perf.audio_thread_submitted = 0;
+	perf.audio_thread_processed = 0;
+	perf.audio_thread_blocked = 0;
+	perf.audio_thread_dropped = 0;
+	if (!enabled)
+	{
+		SND_stopThreadedAudio();
+		return;
+	}
+
+	if (snd.initialized)
+		SND_startThreadedAudio();
+}
+
+size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
+{
+	if (snd_thread.running)
+		return SND_enqueueThreadedSamples(frames, frame_count, 0);
+	return SND_batchSamples_internal(&snd_resampler_direct, frames, frame_count, GFX_getCurrentFPSInternal(), snd.frame_rate);
+}
+
+size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
+{
+	if (snd_thread.running)
+		return SND_enqueueThreadedSamples(frames, frame_count, 1);
+	return SND_batchSamples_fixed_rate_internal(&snd_resampler_direct, frames, frame_count);
 }
 
 void SND_init(double sample_rate, double frame_rate)
@@ -2835,6 +3066,10 @@ void SND_init(double sample_rate, double frame_rate)
 	SND_pauseAudio(true);
 	LOG_info("sample rate: %i (req) %i (rec) [samples %i]\n", snd.sample_rate_in, snd.sample_rate_out, SAMPLES);
 	snd.initialized = 1;
+	snd_resampler_direct.sound_quality = soundQuality;
+	snd_thread.resampler.sound_quality = soundQuality;
+	if (snd_thread.enabled)
+		SND_startThreadedAudio();
 
 }
 
@@ -2846,6 +3081,7 @@ void SND_quit(void)
 		return;
 	}
 
+	SND_stopThreadedAudio();
 	SND_pauseAudio(true);
 
 #if defined(USE_SDL2)
@@ -2864,6 +3100,15 @@ void SND_quit(void)
 	{
 		free(snd.buffer);
 		snd.buffer = NULL;
+	}
+
+	SND_destroyResamplerState(&snd_resampler_direct);
+	for (int i = 0; i < AUDIO_PACKET_QUEUE_SIZE; i++)
+	{
+		free(snd_thread.packets[i].frames);
+		snd_thread.packets[i].frames = NULL;
+		snd_thread.packets[i].capacity = 0;
+		snd_thread.packets[i].frame_count = 0;
 	}
 }
 

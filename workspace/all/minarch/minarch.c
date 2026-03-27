@@ -84,6 +84,7 @@ static int sync_ref = 0;
 static int show_debug = 0;
 static int max_ff_speed = 3; // 4x
 static int ff_audio = 0;
+static int threaded_video_enabled = 1;
 static int fast_forward = 0;
 static int rewind_pressed = 0;
 static int rewind_toggle = 0;
@@ -108,6 +109,79 @@ static int DEVICE_PITCH = 0;
 static int shader_reset_suppressed = 0;
 
 GFX_Renderer renderer;
+
+typedef struct {
+	int screen_scaling;
+	int ambient_mode;
+	int show_debug;
+	int fast_forward;
+	int use_core_fps;
+	int force_reset;
+	int shader_reset_suppressed;
+	uint32_t reset_generation;
+	enum retro_pixel_format pixel_format;
+	double core_fps;
+	double aspect_ratio;
+} ThreadedVideoStateSnapshot;
+
+typedef struct {
+	uint8_t *buffer;
+	size_t capacity;
+	size_t data_size;
+	unsigned width;
+	unsigned height;
+	size_t pitch;
+	uint64_t frame_count;
+	int valid;
+	int reuse_last;
+	ThreadedVideoStateSnapshot state;
+} ThreadedVideoFrame;
+
+typedef struct {
+	pthread_t worker;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	pthread_cond_t idle_cond;
+	int running;
+	int stop_requested;
+	int paused;
+	int worker_busy;
+	int worker_has_context;
+	int pending_index;
+	int inflight_index;
+	int next_slot;
+	uint32_t reset_generation;
+	uint32_t applied_reset_generation;
+	ThreadedVideoFrame frames[2];
+	unsigned last_width;
+	unsigned last_height;
+	int last_valid;
+	uint64_t last_presented_frame;
+	uint32_t last_flip_time;
+	uint64_t last_present_counter;
+	int64_t sync_frame_index;
+	int64_t sync_first_frame_time;
+	double sync_target_fps;
+} ThreadedVideoContext;
+
+static ThreadedVideoContext threaded_video = {
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER,
+	.idle_cond = PTHREAD_COND_INITIALIZER,
+	.pending_index = -1,
+	.inflight_index = -1,
+};
+
+static ThreadedVideoStateSnapshot ThreadedVideo_buildStateSnapshot(void);
+static void ThreadedVideo_request_reset(void);
+static void ThreadedVideo_start(void);
+static void ThreadedVideo_stop(void);
+static void ThreadedVideo_pause_for_ui(void);
+static void ThreadedVideo_resume_from_ui(void);
+static int ThreadedVideo_is_active(void);
+static void ThreadedVideo_apply_gameplay_mode(void);
+static unsigned char* capture_current_frame(int *cw, int *ch);
+static size_t MinarchAudio_submitFrames(const SND_Frame *frames, size_t frame_count, int fixed_rate);
 
 ///////////////////////////////////////
 
@@ -2313,6 +2387,7 @@ enum {
 	FE_OPT_DEBUG,
 	FE_OPT_MAXFF,
 	FE_OPT_FF_AUDIO,
+	FE_OPT_THREADED_VIDEO,
 	FE_OPT_REWIND_ENABLE,
 	FE_OPT_REWIND_BUFFER,
 	FE_OPT_REWIND_GRANULARITY,
@@ -2677,6 +2752,16 @@ static struct Config {
 				.values = onoff_labels,
 				.labels = onoff_labels,
 			},
+			[FE_OPT_THREADED_VIDEO] = {
+				.key	= "minarch_threaded_video",
+				.name	= "Threaded Video",
+				.desc	= "Runs gameplay video presentation on a separate thread\nto reduce audio underruns and frame pacing spikes.",
+				.default_value = 1,
+				.value = 1,
+				.count = 2,
+				.values = onoff_labels,
+				.labels = onoff_labels,
+			},
 			[FE_OPT_REWIND_ENABLE] = {
 				.key	= "minarch_rewind_enable",
 				.name	= "Rewind",
@@ -3021,6 +3106,7 @@ static void Config_syncFrontend(char* key, int value) {
 		screen_scaling 	= value;
 		
 		renderer.dst_p = 0;
+		ThreadedVideo_request_reset();
 		i = FE_OPT_SCALING;
 	}
 	else if (exactMatch(key,config.frontend.options[FE_OPT_RESAMPLING].key)) {
@@ -3040,6 +3126,7 @@ static void Config_syncFrontend(char* key, int value) {
 		screen_effect = value;
 		GFX_setEffect(value);
 		renderer.dst_p = 0;
+		ThreadedVideo_request_reset();
 		i = FE_OPT_EFFECT;
 	}
 	else if (exactMatch(key,config.frontend.options[FE_OPT_OVERLAY].key)) {
@@ -3053,6 +3140,7 @@ static void Config_syncFrontend(char* key, int value) {
 				GFX_setOverlay(overlayList[value], core.tag);
 				overlay = value;
 				renderer.dst_p = 0;
+				ThreadedVideo_request_reset();
 				i = FE_OPT_OVERLAY;
 			}
 		}
@@ -3090,6 +3178,17 @@ static void Config_syncFrontend(char* key, int value) {
 	else if (exactMatch(key,config.frontend.options[FE_OPT_FF_AUDIO].key)) {
 		ff_audio = value;
 		i = FE_OPT_FF_AUDIO;
+	}
+	else if (exactMatch(key,config.frontend.options[FE_OPT_THREADED_VIDEO].key)) {
+		threaded_video_enabled = value;
+		i = FE_OPT_THREADED_VIDEO;
+		SND_enableThreadedProcessing(false);
+		if (core.initialized && !show_menu) {
+			if (threaded_video_enabled)
+				ThreadedVideo_start();
+			else
+				ThreadedVideo_stop();
+		}
 	}
 	else if (exactMatch(key,config.frontend.options[FE_OPT_REWIND_ENABLE].key)) {
 		i = FE_OPT_REWIND_ENABLE;
@@ -3150,6 +3249,7 @@ static void Config_syncFrontend(char* key, int value) {
 static void apply_live_video_reset(void) {
 	// defer work to the video thread: mark scaler dirty (shader reset not needed here)
 	renderer.dst_p = 0;
+	ThreadedVideo_request_reset();
 	// If shaders are disabled (0 passes), force a reset so the default pipeline rebuilds
 	if (config.shaders.options[SH_NROFSHADERS].value == 0) {
 		GFX_resetShaders();
@@ -3654,6 +3754,7 @@ static void Config_restore(void) {
 	Config_free();
 	
 	renderer.dst_p = 0;
+	ThreadedVideo_request_reset();
 }
 
 void readShadersPreset(int i) {
@@ -4645,6 +4746,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 			core.sample_rate = av->timing.sample_rate;
 			core.aspect_ratio = a;
 			renderer.dst_p = 0;
+			ThreadedVideo_request_reset();
 		}
 		return true;
 	}
@@ -4680,6 +4782,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 			if (a <= 0) a = (double)geom->base_width / geom->base_height;
 			core.aspect_ratio = a;
 			renderer.dst_p = 0;
+			ThreadedVideo_request_reset();
 		}
 		return true;
 	}
@@ -5407,16 +5510,19 @@ void drawGauge(int x, int y, float percent, int width, int height, uint32_t *dat
 
 ///////////////////////////////
 
-static void selectScaler(int src_w, int src_h, int src_p) {
+static void selectScalerWithState(int src_w, int src_h, int src_p, int scaling_value, double aspect_ratio) {
 	int src_x,src_y,dst_x,dst_y,dst_w,dst_h,dst_p,scale;
 	double aspect;
 	
+	if (aspect_ratio <= 0.0)
+		aspect_ratio = (double)src_w / src_h;
+
 	int aspect_w = src_w;
-	int aspect_h = CEIL_DIV(aspect_w, core.aspect_ratio);
+	int aspect_h = CEIL_DIV(aspect_w, aspect_ratio);
 	
 	if (aspect_h<src_h) {
 		aspect_h = src_h;
-		aspect_w = aspect_h * core.aspect_ratio;
+		aspect_w = aspect_h * aspect_ratio;
 		aspect_w += aspect_w % 2;
 	}
 
@@ -5432,7 +5538,7 @@ static void selectScaler(int src_w, int src_h, int src_p) {
 	renderer.true_h = src_h;
 	
 	// TODO: this is saving non-rgb30 devices from themselves...or rather, me
-	int scaling = screen_scaling;
+	int scaling = scaling_value;
 	if (scaling==SCALE_CROPPED && DEVICE_WIDTH==HDMI_WIDTH) {
 		scaling = SCALE_NATIVE;
 	}
@@ -5555,7 +5661,7 @@ static void selectScaler(int src_w, int src_h, int src_p) {
 			double src_aspect_ratio = ((double)src_w) / src_h;
 			// double core_aspect_ratio
 			double fixed_aspect_ratio = ((double)DEVICE_WIDTH) / DEVICE_HEIGHT;
-			int core_aspect = core.aspect_ratio * 1000;
+			int core_aspect = aspect_ratio * 1000;
 			int fixed_aspect = fixed_aspect_ratio * 1000;
 			
 			// still having trouble with FC's 1.306 (13/10? wtf) on 4:3 devices
@@ -5574,7 +5680,7 @@ static void selectScaler(int src_w, int src_h, int src_p) {
 				// dst_w = scaled_w;
 				// dst_h = scaled_w / fixed_aspect_ratio;
 				// dst_h += dst_h%2;
-				int aspect_h = DEVICE_WIDTH / core.aspect_ratio;
+				int aspect_h = DEVICE_WIDTH / aspect_ratio;
 				double aspect_hr = ((double)aspect_h) / DEVICE_HEIGHT;
 				dst_w = scaled_w;
 				dst_h = scaled_h / aspect_hr;
@@ -5587,7 +5693,7 @@ static void selectScaler(int src_w, int src_h, int src_p) {
 				// dst_w = scaled_h * fixed_aspect_ratio;
 				// dst_w += dst_w%2;
 				// dst_h = scaled_h;
-				aspect_w = DEVICE_HEIGHT * core.aspect_ratio;
+				aspect_w = DEVICE_HEIGHT * aspect_ratio;
 				double aspect_wr = ((double)aspect_w) / DEVICE_WIDTH;
 				dst_w = scaled_w / aspect_wr;
 				dst_h = scaled_h;
@@ -5618,17 +5724,18 @@ static void selectScaler(int src_w, int src_h, int src_p) {
 	renderer.dst_p = dst_p;
 
 	renderer.scale = scale;
-	renderer.aspect = (scaling==SCALE_ASPECT_SCREEN) ? aspect: (scaling==SCALE_NATIVE||scaling==SCALE_CROPPED)?0:(scaling==SCALE_FULLSCREEN?-1:core.aspect_ratio);
+	renderer.aspect = (scaling==SCALE_ASPECT_SCREEN) ? aspect: (scaling==SCALE_NATIVE||scaling==SCALE_CROPPED)?0:(scaling==SCALE_FULLSCREEN?-1:aspect_ratio);
 	renderer.blit = GFX_getScaler(&renderer);
 }
-static void screen_flip(SDL_Surface* screen) {
-	
-	if (use_core_fps) {
-		GFX_flip_fixed_rate(screen, core.fps);
+static void selectScaler(int src_w, int src_h, int src_p) {
+	selectScalerWithState(src_w, src_h, src_p, screen_scaling, core.aspect_ratio);
+}
+static void screen_flip_for_state(SDL_Surface* screen, const ThreadedVideoStateSnapshot *state) {
+	if (state->use_core_fps) {
+		GFX_flip_fixed_rate(screen, state->core_fps);
 	}
 	else {
 		GFX_GL_Swap();
-		// GFX_flip(screen);
 	}
 }
 
@@ -5670,9 +5777,9 @@ void applyFadeIn(uint32_t **data, size_t pitch, unsigned width, unsigned height,
     *data = temp_buffer;
 }
 
-static void drawDebugHud(const void* data, unsigned width, unsigned height, size_t pitch, enum retro_pixel_format fmt)
+static void drawDebugHud(const void* data, unsigned width, unsigned height, size_t pitch, enum retro_pixel_format fmt, int debug_enabled)
 {
-	if (show_debug && !isnan(perf.ratio) && !isnan(perf.fps) && !isnan(perf.req_fps)  && !isnan(perf.buffer_ms) &&
+	if (debug_enabled && !isnan(perf.ratio) && !isnan(perf.fps) && !isnan(perf.req_fps)  && !isnan(perf.buffer_ms) &&
 		perf.buffer_size >= 0  && perf.buffer_free >= 0 && SDL_GetTicks() > 5000) {
 		int x = 2 + renderer.src_x;
 		int y = 2 + renderer.src_y;
@@ -5715,24 +5822,20 @@ static void drawDebugHud(const void* data, unsigned width, unsigned height, size
 			sprintf(debug_text, "%i/%ix%i/%ix%i/%ix%i", currentshaderpass, currentshadersrcw,currentshadersrch,currentshadertexw,currentshadertexh,currentshaderdstw,currentshaderdsth);
 			blitBitmapText(debug_text,x,-y - 42,(uint32_t*)data,pitch / 4, width,height);
 		}
-	
+
 		double buffer_fill = (double) (perf.buffer_size - perf.buffer_free) / (double) perf.buffer_size;
 		drawGauge(x, y + 30, buffer_fill, width / 2, 8, (uint32_t*)data, pitch / 4);
 	}
 }
 
-static void video_refresh_callback_main(const void *data, unsigned width, unsigned height, size_t pitch) {
-	// return;
-
+static int video_refresh_present(const ThreadedVideoStateSnapshot *state, const void *data, unsigned width, unsigned height, size_t pitch, uint32_t *last_flip_time, int threaded_mode) {
 	Special_render();
-	
-	static uint32_t last_flip_time = 0;
-	
+
 	// 10 seems to be the sweet spot that allows 2x in NES and SNES and 8x in GB at 60fps
 	// 14 will let GB hit 10x but NES and SNES will drop to 1.5x at 30fps (not sure why)
 	// but 10 hurts PS...
 	// TODO: 10 was based on rg35xx, probably different results on other supported platforms
-	if (fast_forward && SDL_GetTicks()-last_flip_time<10) return;
+	if (state->fast_forward && SDL_GetTicks()-*last_flip_time<10) return 0;
 	
 	// FFVII menus 
 	// 16: 30/200
@@ -5743,23 +5846,27 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	//  8: 60/210 (with optimize text off)
 	// eg. PS@10 60/240
 	if (!data) {
-		return;
+		return 0;
 	}
 
 	// if source has changed size (or forced by dst_p==0)
 	// eg. true src + cropped src + fixed dst + cropped dst
-	if (renderer.dst_p==0 || width!=renderer.true_w || height!=renderer.true_h) {
-		selectScaler(width, height, pitch);
+	if (state->force_reset || renderer.dst_p==0 || width!=renderer.true_w || height!=renderer.true_h) {
+		selectScalerWithState(width, height, pitch, state->screen_scaling, state->aspect_ratio);
 		GFX_clearAll();
-		if (!shader_reset_suppressed) {
+		if (!state->shader_reset_suppressed) {
 			GFX_resetShaders();
 		} else {
 			shader_reset_suppressed = 0; // consume suppression after one use
 		}
 	}
+
+	if (state->ambient_mode && !state->fast_forward) {
+		GFX_setAmbientColor(data, width, height, pitch, state->ambient_mode);
+	}
 	
 	// debug
-	drawDebugHud(data, width, height, pitch, fmt);
+	drawDebugHud(data, width, height, pitch, state->pixel_format, state->show_debug);
 	
 	static int frame_counter = 0;
 	const int max_frames = 8; 
@@ -5771,8 +5878,17 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	renderer.dst = screen->pixels;
 	GFX_blitRenderer(&renderer);
 
-	screen_flip(screen);
-	last_flip_time = SDL_GetTicks();
+	if (!threaded_mode) {
+		screen_flip_for_state(screen, state);
+		*last_flip_time = SDL_GetTicks();
+	}
+	return 1;
+}
+
+static void video_refresh_callback_main(const void *data, unsigned width, unsigned height, size_t pitch) {
+	static uint32_t last_flip_time = 0;
+	ThreadedVideoStateSnapshot state = ThreadedVideo_buildStateSnapshot();
+	video_refresh_present(&state, data, width, height, pitch, &last_flip_time, 0);
 }
 
 const void* lastframe = NULL;
@@ -5921,6 +6037,341 @@ static void convert_rgb565_to_rgba(const void* src, uint32_t* dst, unsigned widt
 	}
 }
 
+static ThreadedVideoStateSnapshot ThreadedVideo_buildStateSnapshot(void) {
+	ThreadedVideoStateSnapshot state = {
+		.screen_scaling = screen_scaling,
+		.ambient_mode = ambient_mode,
+		.show_debug = show_debug,
+		.fast_forward = fast_forward,
+		.use_core_fps = use_core_fps,
+		.force_reset = renderer.dst_p == 0,
+		.shader_reset_suppressed = shader_reset_suppressed,
+		.reset_generation = 0,
+		.pixel_format = fmt,
+		.core_fps = core.fps,
+		.aspect_ratio = core.aspect_ratio,
+	};
+
+	pthread_mutex_lock(&threaded_video.mutex);
+	state.reset_generation = threaded_video.reset_generation;
+	if (threaded_video.reset_generation != threaded_video.applied_reset_generation) {
+		state.force_reset = 1;
+	}
+	pthread_mutex_unlock(&threaded_video.mutex);
+	return state;
+}
+
+static int ThreadedVideo_is_active(void) {
+	int active;
+	pthread_mutex_lock(&threaded_video.mutex);
+	active = threaded_video_enabled && threaded_video.running && !threaded_video.paused;
+	pthread_mutex_unlock(&threaded_video.mutex);
+	return active;
+}
+
+static void ThreadedVideo_request_reset(void) {
+	pthread_mutex_lock(&threaded_video.mutex);
+	threaded_video.reset_generation++;
+	pthread_mutex_unlock(&threaded_video.mutex);
+}
+
+static double ThreadedVideo_target_fps(const ThreadedVideoStateSnapshot *state) {
+	double target_fps = SCREEN_FPS;
+
+	if (state && state->use_core_fps)
+		target_fps = state->core_fps;
+	if (!isfinite(target_fps) || target_fps <= 0.0)
+		target_fps = SCREEN_FPS;
+	return target_fps;
+}
+
+static void ThreadedVideo_reset_timing(void) {
+	threaded_video.last_present_counter = 0;
+	threaded_video.sync_frame_index = -1;
+	threaded_video.sync_first_frame_time = 0;
+	threaded_video.sync_target_fps = 0.0;
+	GFX_resetTimingStats();
+}
+
+static void ThreadedVideo_wait_fixed_rate(double target_fps) {
+	int64_t perf_freq;
+	int64_t now;
+	int64_t frame_duration;
+	int64_t time_of_frame;
+	int64_t offset;
+	const int max_lost_frames = 2;
+
+	if (target_fps <= 0.0 || !isfinite(target_fps))
+		target_fps = SCREEN_FPS;
+
+	perf_freq = SDL_GetPerformanceFrequency();
+	now = SDL_GetPerformanceCounter();
+
+	if (++threaded_video.sync_frame_index == 0 || target_fps != threaded_video.sync_target_fps) {
+		threaded_video.sync_frame_index = 0;
+		threaded_video.sync_first_frame_time = now;
+		threaded_video.sync_target_fps = target_fps;
+		return;
+	}
+
+	frame_duration = perf_freq / target_fps;
+	time_of_frame = threaded_video.sync_first_frame_time + threaded_video.sync_frame_index * frame_duration;
+	offset = now - time_of_frame;
+
+	if (offset > max_lost_frames * frame_duration || offset < -max_lost_frames * frame_duration) {
+		threaded_video.sync_frame_index = 0;
+		threaded_video.sync_first_frame_time = now;
+		threaded_video.sync_target_fps = target_fps;
+		return;
+	}
+
+	if (offset < 0) {
+		int64_t remaining = time_of_frame - now;
+		uint64_t time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+		if (time_to_sleep_us > 2000)
+			SDL_Delay((uint32_t)((time_to_sleep_us - 1000) / 1000));
+		now = SDL_GetPerformanceCounter();
+		if (now < time_of_frame) {
+			remaining = time_of_frame - now;
+			time_to_sleep_us = (uint64_t)((remaining * 1000000LL) / perf_freq);
+			if (time_to_sleep_us > 0)
+				usleep((useconds_t)time_to_sleep_us);
+		}
+	}
+}
+
+static void ThreadedVideo_record_present_timing(const ThreadedVideoStateSnapshot *state) {
+	double frame_ms;
+	double target_fps = ThreadedVideo_target_fps(state);
+	uint64_t now = SDL_GetPerformanceCounter();
+	uint64_t perf_freq = SDL_GetPerformanceFrequency();
+
+	if (threaded_video.last_present_counter == 0)
+		frame_ms = 1000.0 / target_fps;
+	else
+		frame_ms = ((double)(now - threaded_video.last_present_counter) * 1000.0) / (double)perf_freq;
+
+	threaded_video.last_present_counter = now;
+	GFX_recordFrameTiming(frame_ms, target_fps);
+}
+
+static void ThreadedVideo_renderFrame(ThreadedVideoFrame *frame) {
+	const void *render_data = NULL;
+	size_t render_pitch = frame->pitch;
+
+	if (frame->reuse_last) {
+		render_data = lastframe;
+		if (!render_data)
+			return;
+		render_pitch = frame->width * sizeof(Uint32);
+	}
+	else {
+		if (!rgbaData || rgbaDataSize != frame->width * frame->height) {
+			if (rgbaData) free(rgbaData);
+			rgbaDataSize = frame->width * frame->height;
+			rgbaData = (Uint32*)malloc(rgbaDataSize * sizeof(Uint32));
+			if (!rgbaData) {
+				LOG_error("Failed to allocate threaded video RGBA buffer\n");
+				return;
+			}
+		}
+
+		if (frame->state.pixel_format == RETRO_PIXEL_FORMAT_XRGB8888)
+			convert_xrgb8888_to_rgba(frame->buffer, rgbaData, frame->width, frame->height, frame->pitch);
+		else
+			convert_rgb565_to_rgba(frame->buffer, rgbaData, frame->width, frame->height, frame->pitch);
+
+		render_data = rgbaData;
+		lastframe = render_data;
+		render_pitch = frame->width * sizeof(Uint32);
+	}
+
+	if (!video_refresh_present(&frame->state, render_data, frame->width, frame->height, render_pitch, &threaded_video.last_flip_time, 1))
+		return;
+
+	if (!frame->state.fast_forward && frame->state.use_core_fps)
+		ThreadedVideo_wait_fixed_rate(ThreadedVideo_target_fps(&frame->state));
+	PLAT_GL_Swap();
+	ThreadedVideo_record_present_timing(&frame->state);
+	threaded_video.last_flip_time = SDL_GetTicks();
+
+	if (frame->state.force_reset) {
+		pthread_mutex_lock(&threaded_video.mutex);
+		if (threaded_video.applied_reset_generation < frame->state.reset_generation)
+			threaded_video.applied_reset_generation = frame->state.reset_generation;
+		pthread_mutex_unlock(&threaded_video.mutex);
+	}
+
+	perf.video_thread_presented++;
+	threaded_video.last_presented_frame = frame->frame_count;
+	threaded_video.last_width = frame->width;
+	threaded_video.last_height = frame->height;
+	threaded_video.last_valid = 1;
+}
+
+static void *ThreadedVideo_worker(void *unused) {
+	(void)unused;
+	int has_context = 0;
+
+	for (;;) {
+		int frame_index = -1;
+
+		pthread_mutex_lock(&threaded_video.mutex);
+		while (!threaded_video.stop_requested &&
+			   (threaded_video.paused || threaded_video.pending_index == -1)) {
+			if (has_context) {
+				pthread_mutex_unlock(&threaded_video.mutex);
+				GFX_releaseGLContext();
+				pthread_mutex_lock(&threaded_video.mutex);
+				has_context = 0;
+				threaded_video.worker_has_context = 0;
+				pthread_cond_broadcast(&threaded_video.idle_cond);
+			}
+			pthread_cond_wait(&threaded_video.cond, &threaded_video.mutex);
+		}
+
+		if (threaded_video.stop_requested) {
+			threaded_video.worker_has_context = 0;
+			pthread_mutex_unlock(&threaded_video.mutex);
+			if (has_context)
+				GFX_releaseGLContext();
+			break;
+		}
+
+		if (!has_context) {
+			pthread_mutex_unlock(&threaded_video.mutex);
+			GFX_acquireGLContext();
+			pthread_mutex_lock(&threaded_video.mutex);
+			has_context = 1;
+			threaded_video.worker_has_context = 1;
+		}
+
+			frame_index = threaded_video.pending_index;
+			threaded_video.pending_index = -1;
+			threaded_video.inflight_index = frame_index;
+			threaded_video.worker_busy = 1;
+			pthread_cond_broadcast(&threaded_video.idle_cond);
+			pthread_mutex_unlock(&threaded_video.mutex);
+
+		ThreadedVideo_renderFrame(&threaded_video.frames[frame_index]);
+
+		pthread_mutex_lock(&threaded_video.mutex);
+		threaded_video.inflight_index = -1;
+		threaded_video.worker_busy = 0;
+		pthread_cond_broadcast(&threaded_video.idle_cond);
+		pthread_mutex_unlock(&threaded_video.mutex);
+	}
+
+	return NULL;
+}
+
+static void ThreadedVideo_start(void) {
+	if (!threaded_video_enabled || threaded_video.running)
+		return;
+
+	GFX_releaseGLContext();
+	pthread_mutex_lock(&threaded_video.mutex);
+	threaded_video.stop_requested = 0;
+	threaded_video.paused = 0;
+	threaded_video.worker_busy = 0;
+	threaded_video.worker_has_context = 0;
+	threaded_video.pending_index = -1;
+	threaded_video.inflight_index = -1;
+	threaded_video.next_slot = 0;
+	threaded_video.last_flip_time = 0;
+	ThreadedVideo_reset_timing();
+	threaded_video.reset_generation++;
+	threaded_video.applied_reset_generation = 0;
+	pthread_mutex_unlock(&threaded_video.mutex);
+	perf.video_thread_submitted = 0;
+	perf.video_thread_presented = 0;
+	perf.video_thread_dropped = 0;
+	perf.video_thread_blocked = 0;
+	if (pthread_create(&threaded_video.worker, NULL, ThreadedVideo_worker, NULL) != 0) {
+		LOG_error("Failed to start threaded video worker\n");
+		GFX_acquireGLContext();
+		return;
+	}
+	threaded_video.running = 1;
+}
+
+static void ThreadedVideo_stop(void) {
+	if (!threaded_video.running)
+		return;
+
+	pthread_mutex_lock(&threaded_video.mutex);
+	threaded_video.stop_requested = 1;
+	pthread_cond_broadcast(&threaded_video.cond);
+	pthread_cond_broadcast(&threaded_video.idle_cond);
+	pthread_mutex_unlock(&threaded_video.mutex);
+
+	pthread_join(threaded_video.worker, NULL);
+	threaded_video.running = 0;
+	threaded_video.stop_requested = 0;
+	threaded_video.pending_index = -1;
+	threaded_video.inflight_index = -1;
+	threaded_video.worker_busy = 0;
+	threaded_video.worker_has_context = 0;
+	threaded_video.paused = 0;
+	ThreadedVideo_reset_timing();
+	GFX_acquireGLContext();
+}
+
+static void ThreadedVideo_pause_for_ui(void) {
+	if (!threaded_video.running)
+		return;
+
+	pthread_mutex_lock(&threaded_video.mutex);
+	threaded_video.paused = 1;
+	threaded_video.pending_index = -1;
+	pthread_cond_broadcast(&threaded_video.cond);
+	while (threaded_video.worker_busy || threaded_video.worker_has_context)
+		pthread_cond_wait(&threaded_video.idle_cond, &threaded_video.mutex);
+	pthread_mutex_unlock(&threaded_video.mutex);
+	GFX_acquireGLContext();
+}
+
+static void ThreadedVideo_resume_from_ui(void) {
+	if (!threaded_video.running || quit)
+		return;
+
+	GFX_releaseGLContext();
+	pthread_mutex_lock(&threaded_video.mutex);
+	threaded_video.paused = 0;
+	ThreadedVideo_reset_timing();
+	threaded_video.reset_generation++;
+	pthread_cond_broadcast(&threaded_video.cond);
+	pthread_mutex_unlock(&threaded_video.mutex);
+}
+
+static void ThreadedVideo_apply_gameplay_mode(void) {
+	if (quit)
+		return;
+
+	if (threaded_video_enabled) {
+		if (threaded_video.running)
+			ThreadedVideo_resume_from_ui();
+		else
+			ThreadedVideo_start();
+	}
+	else if (threaded_video.running) {
+		ThreadedVideo_stop();
+	}
+}
+
+static unsigned char* capture_current_frame(int *cw, int *ch) {
+	int resume_after = ThreadedVideo_is_active();
+	if (resume_after)
+		ThreadedVideo_pause_for_ui();
+
+	unsigned char *pixels = GFX_GL_screenCapture(cw, ch);
+
+	if (resume_after)
+		ThreadedVideo_resume_from_ui();
+
+	return pixels;
+}
+
 static void video_refresh_callback(const void* data, unsigned width, unsigned height, size_t pitch) {
 	// Log NEON availability once on first call
 	static int neon_logged = 0;
@@ -5935,6 +6386,65 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 
 	// Early exit if quitting to avoid rendering stale frames
 	if (quit) return;
+
+	if (ThreadedVideo_is_active()) {
+		ThreadedVideoStateSnapshot state = ThreadedVideo_buildStateSnapshot();
+		ThreadedVideoFrame *frame = NULL;
+		int slot = 0;
+		size_t bytes = pitch * height;
+
+		pthread_mutex_lock(&threaded_video.mutex);
+		if (!state.fast_forward) {
+			while (!threaded_video.stop_requested && !threaded_video.paused && threaded_video.pending_index != -1) {
+				perf.video_thread_blocked++;
+				pthread_cond_wait(&threaded_video.idle_cond, &threaded_video.mutex);
+			}
+		}
+
+		if (threaded_video.stop_requested || threaded_video.paused) {
+			pthread_mutex_unlock(&threaded_video.mutex);
+			return;
+		}
+
+		if (state.fast_forward && threaded_video.pending_index != -1) {
+			slot = threaded_video.pending_index;
+			perf.video_thread_dropped++;
+		} else if (threaded_video.inflight_index != -1) {
+			slot = 1 - threaded_video.inflight_index;
+			threaded_video.pending_index = slot;
+		} else {
+			slot = threaded_video.next_slot;
+			threaded_video.pending_index = slot;
+			threaded_video.next_slot = 1 - threaded_video.next_slot;
+		}
+
+		frame = &threaded_video.frames[slot];
+		frame->reuse_last = data ? 0 : 1;
+		frame->state = state;
+		frame->width = width;
+		frame->height = height;
+		frame->pitch = pitch;
+		frame->frame_count = perf.video_thread_submitted + 1;
+		frame->valid = 1;
+		frame->data_size = data ? bytes : 0;
+			if (data) {
+				if (frame->capacity < bytes) {
+					uint8_t *grown = realloc(frame->buffer, bytes);
+					if (!grown) {
+						pthread_mutex_unlock(&threaded_video.mutex);
+					LOG_error("Failed to grow threaded video frame buffer\n");
+					return;
+				}
+					frame->buffer = grown;
+					frame->capacity = bytes;
+				}
+				memcpy(frame->buffer, data, bytes);
+			}
+			perf.video_thread_submitted++;
+			pthread_cond_signal(&threaded_video.cond);
+			pthread_mutex_unlock(&threaded_video.mutex);
+			return;
+		}
 
 	// Allocate RGBA buffer if needed
 	if (!rgbaData || rgbaDataSize != width * height) {
@@ -5964,37 +6474,26 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 	}
 	pitch = width * sizeof(Uint32);
 
-	// Set ambient lighting color (if enabled)
-	if (ambient_mode && !fast_forward && data) {
-		GFX_setAmbientColor(data, width, height, pitch, ambient_mode);
-	}
-
-
 	// Render the frame
 	video_refresh_callback_main(data, width, height, pitch);
 }
 ///////////////////////////////
 
+static size_t MinarchAudio_submitFrames(const SND_Frame *frames, size_t frame_count, int fixed_rate) {
+	return fixed_rate ? SND_batchSamples_fixed_rate(frames, frame_count)
+					  : SND_batchSamples(frames, frame_count);
+}
+
 static void audio_sample_callback(int16_t left, int16_t right) {
 	if (rewinding && !rewind_ctx.audio) return;
 	if (!fast_forward || ff_audio) {
-		if (use_core_fps || fast_forward) {
-			SND_batchSamples_fixed_rate(&(const SND_Frame){left,right}, 1);
-		}
-		else {
-			SND_batchSamples(&(const SND_Frame){left,right}, 1);
-		}
+		MinarchAudio_submitFrames(&(const SND_Frame){left,right}, 1, use_core_fps || fast_forward);
 	}
 }
 static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) { 
 	if (rewinding && !rewind_ctx.audio) return frames;
 	if (!fast_forward || ff_audio) {
-		if (use_core_fps || fast_forward) {
-			return SND_batchSamples_fixed_rate((const SND_Frame*)data, frames);
-		}
-		else {
-			return SND_batchSamples((const SND_Frame*)data, frames);
-		}
+		return MinarchAudio_submitFrames((const SND_Frame*)data, frames, use_core_fps || fast_forward);
 	}
 	else return frames;
 };
@@ -8387,7 +8886,7 @@ static void Menu_screenshot(void) {
 	char png_path[256];
 	sprintf(png_path, SDCARD_PATH "/Screenshots/%s.%s.png", rom_name, buffer);
 	int cw, ch;
-	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
+	unsigned char* pixels = capture_current_frame(&cw, &ch);
 	SaveImageArgs* args = malloc(sizeof(SaveImageArgs));
 	args->pixels = pixels;
 	args->w = cw;
@@ -8413,7 +8912,7 @@ static void Menu_saveState(void) {
 	// if already in menu use menu.bitmap instead for saving screenshots otherwise create new one on the fly
 	if (newScreenshot) {
 		int cw, ch;
-		unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
+		unsigned char* pixels = capture_current_frame(&cw, &ch);
 		SaveImageArgs* args = malloc(sizeof(SaveImageArgs));
 		args->pixels = pixels;
 		args->w = cw;
@@ -8474,9 +8973,10 @@ static void Menu_loadState(void) {
 }
 
 static void Menu_loop(void) {
+	ThreadedVideo_pause_for_ui();
 
 	int cw, ch;
-	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
+	unsigned char* pixels = capture_current_frame(&cw, &ch);
 	
 	renderer.dst = pixels;
 	SDL_Surface* rawSurface = SDL_CreateRGBSurfaceWithFormatFrom(
@@ -8828,6 +9328,8 @@ static void Menu_loop(void) {
 
 	SDL_FreeSurface(backing);
 	PWR_disableAutosleep();
+	if (!quit)
+		ThreadedVideo_apply_gameplay_mode();
 }
 
 static void chooseSyncRef(void) {
@@ -9047,6 +9549,7 @@ int main(int argc , char* argv[]) {
 	// Mute audio during startup to avoid pops (InitSettings would be logical, but too late)
 	SND_overrideMute(1);
 	SND_init(core.sample_rate, core.fps);
+	SND_enableThreadedProcessing(false);
 	SND_registerDeviceWatcher(onAudioSinkChanged);
 	InitSettings(); // after we initialize audio
 	Menu_init();
@@ -9090,6 +9593,8 @@ int main(int argc , char* argv[]) {
 	if (core.serialize_size) Rewind_on_state_change();
 	// release config when all is loaded
 	Config_free();
+	if (threaded_video_enabled)
+		ThreadedVideo_start();
 
 	LOG_info("total startup time %ims\n\n",SDL_GetTicks());
 	while (!quit) {
@@ -9168,7 +9673,7 @@ int main(int argc , char* argv[]) {
 		hdmimon();
 	}
 	int cw, ch;
-	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
+	unsigned char* pixels = capture_current_frame(&cw, &ch);
 	
 	renderer.dst = pixels;
 	SDL_Surface* rawSurface = SDL_CreateRGBSurfaceWithFormatFrom(
@@ -9190,6 +9695,7 @@ int main(int argc , char* argv[]) {
 	QuitSettings();
 
 finish:
+	ThreadedVideo_stop();
 
 	// Unload game and shutdown RetroAchievements before Core_quit
 	RA_unloadGame();

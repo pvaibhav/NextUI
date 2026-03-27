@@ -123,6 +123,7 @@ static char* overlay_path = NULL;
 // Notification overlay state for RA achievements
 typedef struct {
     SDL_Surface* surface;
+    SDL_Surface* upload_surface;
     int x;
     int y;
     int dirty;
@@ -132,18 +133,49 @@ typedef struct {
 } NotificationOverlay;
 
 static NotificationOverlay notif = {0};
+static pthread_mutex_t notif_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void PLAT_setNotificationSurface(SDL_Surface* surface, int x, int y) {
-    notif.surface = surface;
+    pthread_mutex_lock(&notif_mutex);
+    if (surface) {
+        if (!notif.upload_surface ||
+            notif.upload_surface->w != surface->w ||
+            notif.upload_surface->h != surface->h ||
+            notif.upload_surface->format->format != surface->format->format) {
+            if (notif.upload_surface)
+                SDL_FreeSurface(notif.upload_surface);
+            notif.upload_surface = SDL_CreateRGBSurfaceWithFormat(
+                0, surface->w, surface->h, surface->format->BitsPerPixel, surface->format->format
+            );
+        }
+
+        if (notif.upload_surface)
+            SDL_BlitSurface(surface, NULL, notif.upload_surface, NULL);
+    }
+
+    notif.surface = surface ? notif.upload_surface : NULL;
     notif.x = x;
     notif.y = y;
     notif.dirty = 1;
+    pthread_mutex_unlock(&notif_mutex);
 }
 
 void PLAT_clearNotificationSurface(void) {
+    pthread_mutex_lock(&notif_mutex);
     notif.surface = NULL;
     notif.dirty = 0;  // Nothing to update since surface is NULL
     notif.clear_frames = 3;  // Clear for 3 frames (triple buffering safety)
+    pthread_mutex_unlock(&notif_mutex);
+}
+
+void PLAT_acquireGLContext(void) {
+    if (vid.window && vid.gl_context)
+        SDL_GL_MakeCurrent(vid.window, vid.gl_context);
+}
+
+void PLAT_releaseGLContext(void) {
+    if (vid.gl_context)
+        SDL_GL_MakeCurrent(NULL, NULL);
 }
 
 
@@ -756,6 +788,10 @@ void PLAT_quitVideo(void) {
 	SDL_GL_MakeCurrent(NULL, NULL);
 	SDL_GL_DeleteContext(vid.gl_context);
 	vid.gl_context = NULL;
+	if (notif.upload_surface) {
+		SDL_FreeSurface(notif.upload_surface);
+		notif.upload_surface = NULL;
+	}
 	SDL_FreeSurface(vid.screen);
 
 	// Cleanup and shutdown
@@ -1555,7 +1591,6 @@ void setRectToAspectRatio(SDL_Rect* dst_rect) {
 
 void PLAT_blitRenderer(GFX_Renderer* renderer) {
 	vid.blit = renderer;
-	SDL_RenderClear(vid.renderer);
 	resizeVideo(vid.blit->true_w,vid.blit->true_h,vid.blit->src_p);
 }
 
@@ -1916,26 +1951,35 @@ void PLAT_GL_Swap() {
         if (prepare_thread == NULL) {
             LOG_error("Error creating background thread: %s\n", SDL_GetError());
             return;
-        }
-    }
+	        }
+	    }
+
+	SDL_GL_MakeCurrent(vid.window, vid.gl_context);
 
     static int lastframecount = 0;
     if (reloadShaderTextures) lastframecount = frame_count;
-    if (frame_count < lastframecount + 3 || notif.clear_frames > 0) {
+    pthread_mutex_lock(&notif_mutex);
+    int clear_frames = notif.clear_frames;
+    pthread_mutex_unlock(&notif_mutex);
+
+    if (frame_count < lastframecount + 3 || clear_frames > 0) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (notif.clear_frames > 0) notif.clear_frames--;
+        if (clear_frames > 0) {
+            pthread_mutex_lock(&notif_mutex);
+            if (notif.clear_frames > 0)
+                notif.clear_frames--;
+            pthread_mutex_unlock(&notif_mutex);
+        }
     }
 
     SDL_Rect dst_rect = {0, 0, device_width, device_height};
     setRectToAspectRatio(&dst_rect);
 
-    if (!vid.blit->src) {
-        return;
-    }
+	    if (!vid.blit->src) {
+	        return;
+	    }
 
-	SDL_GL_MakeCurrent(vid.window, vid.gl_context);
-
-	static GLuint effect_tex = 0;
+		static GLuint effect_tex = 0;
 	static int effect_w = 0, effect_h = 0;
 	static GLuint overlay_tex = 0;
 	static int overlay_w = 0, overlay_h = 0;
@@ -2170,6 +2214,7 @@ void PLAT_GL_Swap() {
     }
 
     // Render notification overlay if present (texture pre-allocated in PLAT_initShaders)
+    pthread_mutex_lock(&notif_mutex);
     if (notif.dirty && notif.surface) {
         glBindTexture(GL_TEXTURE_2D, notif.tex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, notif.surface->w, notif.surface->h, GL_RGBA, GL_UNSIGNED_BYTE, notif.surface->pixels);
@@ -2186,6 +2231,7 @@ void PLAT_GL_Swap() {
             1, GL_NONE
         );
     }
+    pthread_mutex_unlock(&notif_mutex);
 
 	SDL_GL_SwapWindow(vid.window);
 
@@ -2233,6 +2279,7 @@ void PLAT_pixelFlipper(uint8_t* pixels, int width, int height) {
 }
 
 unsigned char* PLAT_GL_screenCapture(int* outWidth, int* outHeight) {
+    SDL_GL_MakeCurrent(vid.window, vid.gl_context);
     glViewport(0, 0, device_width, device_height);
     GLint viewport[4];
     glGetIntegerv(GL_VIEWPORT, viewport);

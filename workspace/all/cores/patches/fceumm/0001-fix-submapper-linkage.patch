@@ -1,0 +1,26 @@
+diff --git a/src/boards/341.c b/src/boards/341.c
+index 062f0ff..ec8ef1c 100644
+--- a/src/boards/341.c
++++ b/src/boards/341.c
+@@ -21,7 +21,7 @@
+ #include "mapinc.h"
+ #include "asic_latch.h"
+ 
+-uint8 submapper;
++static uint8 submapper;
+ 
+ static void sync () {
+ 	setprg32(0x8000, Latch_address >>8);
+diff --git a/src/boards/449.c b/src/boards/449.c
+index 692c083..3a3c81f 100644
+--- a/src/boards/449.c
++++ b/src/boards/449.c
+@@ -21,7 +21,7 @@
+ #include "mapinc.h"
+ #include "asic_latch.h"
+ 
+-uint8 submapper;
++static uint8 submapper;
+ uint8 pad;
+ uint8 padSelect;
+ 

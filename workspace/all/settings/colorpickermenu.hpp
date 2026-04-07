@@ -30,5 +30,5 @@ public:
     void reset(uint32_t color, std::vector<ColorPreset> newPresets, std::string label);
 
     InputReactionHint handleInput(int &dirty, int &quit) override;
-    void drawCustom(SDL_Surface *surface, const SDL_Rect &dst) override;
+    void drawCustom(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle) override;
 };

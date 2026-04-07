@@ -542,7 +542,7 @@ SDL_Rect MenuList::itemSizeHint(const AbstractMenuItem &item)
     }
 }
 
-void MenuList::draw(SDL_Surface *surface, const SDL_Rect &dst)
+void MenuList::draw(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     assert(layout_called);
     ReadLock r(itemLock);
@@ -551,7 +551,7 @@ void MenuList::draw(SDL_Surface *surface, const SDL_Rect &dst)
     if (cur && cur->isDeferred())
     {
         assert(cur->getSubMenu());
-        cur->getSubMenu()->draw(surface, dst);
+        cur->getSubMenu()->draw(surface, dst, dstTitle);
     }
     else
     {
@@ -559,20 +559,20 @@ void MenuList::draw(SDL_Surface *surface, const SDL_Rect &dst)
         switch (type)
         {
         case MenuItemType::List:
-            drawList(surface, dst);
+            drawList(surface, dst, dstTitle);
             break;
         case MenuItemType::Fixed:
-            drawFixed(surface, dst);
+            drawFixed(surface, dst, dstTitle);
             break;
         case MenuItemType::Var:
         case MenuItemType::Input:
-            drawInput(surface, dst);
+            drawInput(surface, dst, dstTitle);
             break;
         case MenuItemType::Main:
-            drawMain(surface, dst);
+            drawMain(surface, dst, dstTitle);
             break;
         case MenuItemType::Custom:
-            drawCustom(surface, dst);
+            drawCustom(surface, dst, dstTitle);
             return; // no further drawing over custom
         default:
             assert(false && "Unknown list type");
@@ -613,7 +613,7 @@ void MenuList::draw(SDL_Surface *surface, const SDL_Rect &dst)
     drawOverlayLocal(surface);
 }
 
-void MenuList::drawList(SDL_Surface *surface, const SDL_Rect &dst)
+void MenuList::drawList(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     // we ignore type here, it all paints the same.
     if (max_width == 0)
@@ -662,7 +662,7 @@ void MenuList::drawListItem(SDL_Surface *surface, const SDL_Rect &dst, const Abs
     SDL_FreeSurface(text);
 }
 
-void MenuList::drawFixed(SDL_Surface *surface, const SDL_Rect &dst)
+void MenuList::drawFixed(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     // NOTE: no need to calculate max width
     int mw = dst.w;
@@ -771,7 +771,7 @@ void MenuList::drawFixedItem(SDL_Surface *surface, const SDL_Rect &dst, const Ab
     SDL_FreeSurface(text);
 }
 
-void MenuList::drawInput(SDL_Surface *surface, const SDL_Rect &dst)
+void MenuList::drawInput(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     // TODO: handle type if we need it
     if (max_width == 0)
@@ -837,7 +837,7 @@ void MenuList::drawInputItem(SDL_Surface *surface, const SDL_Rect &dst, const Ab
     }
 }
 
-void MenuList::drawMain(SDL_Surface *surface, const SDL_Rect &dst)
+void MenuList::drawMain(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     // we ignore type here, it all paints the same.
     // no size calc to do here, each line is as wide as needed.

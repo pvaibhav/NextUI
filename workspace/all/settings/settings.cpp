@@ -48,6 +48,13 @@ struct Context
     SDL_Surface *screen;
     int dirty;
     int show_setting;
+
+    // Either the app manages these, or we account for the space and let the menu draw it
+    // We could hardcode the behavior down below, but this should also serve as demo code 
+    // for how to use menu.cpp in different ways depending on the needs of the app
+    bool appManagesTitle = false;
+    bool appManagesIndicator = true;
+    bool appManagesHints = false;
 };
 
 // This is all the MinUiSettings stuff, for now just copied over from the old settings app
@@ -833,10 +840,6 @@ int main(int argc, char *argv[])
 
         ctx.menu = new MenuList(MenuItemType::List, "Main", mainItems);
 
-        const bool showTitle = false;
-        const bool showIndicator = true;
-        const bool showHints = false;
-
         SDL_Surface* bgbmp = IMG_Load(SDCARD_PATH "/bg.png");
         SDL_Surface* convertedbg = SDL_ConvertSurfaceFormat(bgbmp, SDL_PIXELFORMAT_RGB565, 0);
         if (convertedbg) {
@@ -849,11 +852,12 @@ int main(int argc, char *argv[])
         // main content (list)
         // PADDING all around
         SDL_Rect listRect = {SCALE1(PADDING), SCALE1(PADDING), ctx.screen->w - SCALE1(PADDING * 2), ctx.screen->h - SCALE1(PADDING * 2)};
+        SDL_Rect titleRect = {0, 0, 0, 0};
         // PILL_SIZE above (if showing title)
-        if (showTitle || showIndicator)
+        if (ctx.appManagesTitle || ctx.appManagesIndicator)
             listRect = dy(listRect, SCALE1(PILL_SIZE));
         // BUTTON_SIZE below (if showing hints)
-        if (showHints)
+        if (ctx.appManagesHints)
             listRect.h -= SCALE1(BUTTON_SIZE);
         ctx.menu->performLayout(listRect);
 
@@ -890,14 +894,14 @@ int main(int argc, char *argv[])
                 int ow = 0;
 
                 // indicator area top right
-                if (showIndicator)
+                if (ctx.appManagesIndicator)
                 {
                     ow = GFX_blitHardwareGroup(ctx.screen, ctx.show_setting);
                 }
                 int max_width = ctx.screen->w - SCALE1(PADDING * 2) - ow;
 
                 // title pill
-                if (showTitle)
+                if (ctx.appManagesTitle)
                 {
                     char display_name[256];
                     int text_width = GFX_truncateText(font.large, "Some title", display_name, max_width, SCALE1(BUTTON_PADDING * 2));
@@ -910,9 +914,13 @@ int main(int argc, char *argv[])
                     SDL_BlitSurfaceCPP(text, {0, 0, max_width - SCALE1(BUTTON_PADDING * 2), text->h}, ctx.screen, {SCALE1(PADDING + BUTTON_PADDING), SCALE1(PADDING + 4)});
                     SDL_FreeSurface(text);
                 }
+                else {
+                    // just set the titleRect and we will pass it on to the list to populate as needed
+                    titleRect = {SCALE1(PADDING), SCALE1(PADDING), max_width, SCALE1(PILL_SIZE)};
+                }
 
                 // bottom area, button hints
-                if (showHints)
+                if (ctx.appManagesHints)
                 {
                     if (ctx.show_setting && !GetHDMI())
                         GFX_blitHardwareHints(ctx.screen, ctx.show_setting);
@@ -925,7 +933,7 @@ int main(int argc, char *argv[])
                     GFX_blitButtonGroup(hints, 1, ctx.screen, 1);
                 }
 
-                ctx.menu->draw(ctx.screen, listRect);
+                ctx.menu->draw(ctx.screen, listRect, titleRect);
 
                 // present
                 GFX_flip(ctx.screen);

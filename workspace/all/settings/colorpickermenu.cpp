@@ -322,18 +322,17 @@ void ColorPickerMenu::drawPreset(SDL_Surface *surface, const SDL_Rect &row,
     SDL_FreeSurface(name_surf);
 }
 
-void ColorPickerMenu::drawCustom(SDL_Surface *surface, const SDL_Rect &dst)
+void ColorPickerMenu::drawCustom(SDL_Surface *surface, const SDL_Rect &dst, const SDL_Rect &dstTitle)
 {
     // Title text — drawn one PILL_SIZE above the slider area (same row as the clock)
+    if(dstTitle.h > 0 && dstTitle.w > 0)
     {
         char display_name[256];
         GFX_truncateText(font.large, label_.c_str(), display_name,
-                         (surface->w - SCALE1(PADDING * 2)) / 2,
-                         SCALE1(BUTTON_PADDING * 2));
-        SDL_Surface *title_text = TTF_RenderUTF8_Blended(font.large, display_name,
-                                                          uintToColour(THEME_COLOR4_255));
-        int title_y = dst.y - SCALE1(PILL_SIZE) + (SCALE1(PILL_SIZE) - title_text->h) / 2;
-        SDL_BlitSurfaceCPP(title_text, {}, surface, {dst.x, title_y});
+                         dstTitle.w, SCALE1(OPTION_PADDING * 2));
+        SDL_Surface *title_text = TTF_RenderUTF8_Blended(font.large, display_name, uintToColour(THEME_COLOR4_255));
+        // hate the hardcoded +4, but we are matching MinUI code here
+        SDL_BlitSurfaceCPP(title_text, {}, surface, {dstTitle.x + SCALE1(BUTTON_PADDING), dstTitle.y + 4, dstTitle.w - SCALE1(BUTTON_PADDING * 2), title_text->h});
         SDL_FreeSurface(title_text);
     }
 

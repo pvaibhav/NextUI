@@ -7,6 +7,7 @@ extern "C"
 #include "utils.h"
 }
 
+#include <cmath>
 #include <mutex>
 #include <shared_mutex>
 typedef std::shared_mutex Lock;
@@ -719,7 +720,13 @@ void MenuList::drawFixedItem(SDL_Surface *surface, const SDL_Rect &dst, const Ab
 
         if (item.getType() == ListItemType::Color)
         {
-            uint32_t color = mapUint(surface, std::any_cast<uint32_t>(item.getValue()));
+            // Read the live color directly from on_get() so the swatch and hex
+            // label always reflect the current value, even after the RGB picker
+            // sets an arbitrary color that is not in the predefined palette.
+            uint32_t rawColor = item.on_get
+                ? std::any_cast<uint32_t>(item.on_get())
+                : std::any_cast<uint32_t>(item.getValue());
+            uint32_t color = mapUint(surface, rawColor);
             SDL_Rect rect = {
                 dst.x + dst.w - SCALE1(OPTION_PADDING + FONT_TINY),
                 dst.y + SCALE1(BUTTON_SIZE - FONT_TINY) / 2,
@@ -730,6 +737,11 @@ void MenuList::drawFixedItem(SDL_Surface *surface, const SDL_Rect &dst, const Ab
             rect.w -= 1;
             SDL_FillRect(surface, &rect, color);
 #define COLOR_PADDING 4
+            // Rerender the label from the live hex value
+            SDL_FreeSurface(text);
+            char hexLabel[12];
+            snprintf(hexLabel, sizeof(hexLabel), "0x%06X", rawColor);
+            text = TTF_RenderUTF8_Blended(font.tiny, hexLabel, text_color_value);
             SDL_BlitSurfaceCPP(text, {}, surface, {dst.x + mw - text->w - SCALE1(OPTION_PADDING + COLOR_PADDING + FONT_TINY), dst.y + ((dst.h - text->h) / 2)});
         }
         else if(item.getType() == ListItemType::Button) {
@@ -916,6 +928,7 @@ bool MenuList::isOverlayVisible()
     ReadLock r(overlayLock);
     return overlayVisible;
 }
+
 
 static void drawOverlayLocal(SDL_Surface* screen) {
     // ReadLock r(overlayLock); // Assumes caller held lock or is safe

@@ -374,3 +374,4 @@ const MenuListCallback ResetCurrentMenu = [](AbstractMenuItem &itm) -> InputReac
 {
     return InputReactionHint::ResetAllItems;
 };
+

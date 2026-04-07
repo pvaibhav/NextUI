@@ -73,10 +73,11 @@ InputReactionHint ColorPickerMenu::handleInput(int &dirty, int &quit)
         quit = 1;
         return NoOp;
     }
-    else if (PAD_justPressed(BTN_X))
+    else if (PAD_justPressed(BTN_A))
     {
         originalColor_ = currentColor();
         dirty = 1;
+        quit = 1;
         return NoOp;
     }
 
@@ -116,7 +117,7 @@ InputReactionHint ColorPickerMenu::handleInput(int &dirty, int &quit)
     else
     {
         int presetIdx = selected - NUM_SLIDERS;
-        if (PAD_justPressed(BTN_A) && presetIdx < (int)presets.size())
+        if (PAD_justPressed(BTN_X) && presetIdx < (int)presets.size())
         {
             const auto &preset = presets[presetIdx];
             decodeColor(preset.color, r, g, b);
@@ -338,18 +339,18 @@ void ColorPickerMenu::drawCustom(SDL_Surface *surface, const SDL_Rect &dst, cons
 
     // Button hints at the bottom of the screen
     {
-        char *left_hints[] = {(char *)"B", (char *)"BACK", (char *)"X", (char *)"SAVE", nullptr};
-        GFX_blitButtonGroup(left_hints, 0, surface, 0);
+        char *primary_hints[] = {(char *)"B", (char *)"BACK", (char *)"A", (char *)"APPLY", nullptr};
+        GFX_blitButtonGroup(primary_hints, 0, surface, 1);
 
         if (selected < NUM_SLIDERS)
         {
-            char *right_hints[] = {(char *)"L/R", (char *)"FINE", (char *)"L1/R1", (char *)"COARSE", nullptr};
-            GFX_blitButtonGroup(right_hints, 0, surface, 1);
+            char *secondary_hints[] = {(char *)"L/R", (char *)"FINE", (char *)"L1/R1", (char *)"COARSE", nullptr};
+            GFX_blitButtonGroup(secondary_hints, 0, surface, 0);
         }
         else
         {
-            char *right_hints[] = {(char *)"A", (char *)"COPY", nullptr};
-            GFX_blitButtonGroup(right_hints, 0, surface, 1);
+            char *secondary_hints[] = {(char *)"X", (char *)"COPY", nullptr};
+            GFX_blitButtonGroup(secondary_hints, 0, surface, 0);
         }
     }
 

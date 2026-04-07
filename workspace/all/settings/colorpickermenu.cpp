@@ -349,7 +349,7 @@ void ColorPickerMenu::drawCustom(SDL_Surface *surface, const SDL_Rect &dst)
         }
         else
         {
-            char *right_hints[] = {(char *)"A", (char *)"APPLY", nullptr};
+            char *right_hints[] = {(char *)"A", (char *)"COPY", nullptr};
             GFX_blitButtonGroup(right_hints, 0, surface, 1);
         }
     }

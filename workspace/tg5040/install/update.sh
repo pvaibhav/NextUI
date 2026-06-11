@@ -1,8 +1,33 @@
 #!/bin/sh
 
 SDCARD_PATH=/mnt/SDCARD
+PLATFORM=tg5040
+USERDATA_PATH=${SDCARD_PATH}/.userdata/${PLATFORM}
 
 # --------------------------------------
+
+TRIMUI_MODEL=$(strings /usr/trimui/bin/MainUI 2>/dev/null | grep '^Trimui')
+if [ "$TRIMUI_MODEL" = "Trimui Brick" ]; then
+	HOOK_DIR=${USERDATA_PATH}/.hooks/boot.d
+	HOOK_PATH=${HOOK_DIR}/50-color-correction.sh
+	mkdir -p "$HOOK_DIR"
+	cat > "$HOOK_PATH" <<'EOF'
+#!/bin/sh
+
+[ "$DEVICE" = "brick" ] || exit 0
+
+SDCARD_PATH="${SDCARD_PATH:-/mnt/SDCARD}"
+PLATFORM="${PLATFORM:-tg5040}"
+USERDATA_PATH="${USERDATA_PATH:-$SDCARD_PATH/.userdata/$PLATFORM}"
+DISPLAYCAL_PAK="$SDCARD_PATH/Tools/$PLATFORM/Color Correction.pak"
+DISPLAYCAL_BIN="$DISPLAYCAL_PAK/displaycal.elf"
+DISPLAYCAL_CONFIG="$USERDATA_PATH/displaycal.cfg"
+
+[ -x "$DISPLAYCAL_BIN" ] || exit 0
+"$DISPLAYCAL_BIN" apply "$DISPLAYCAL_CONFIG"
+EOF
+	chmod +x "$HOOK_PATH"
+fi
 # remove old brick system folder
 BRICK_PATH=${SDCARD_PATH}/.system/tg3040
 echo "check for $BRICK_PATH"

@@ -309,7 +309,9 @@ static int apply_config(const DisplayCalConfig *config) {
 
 	int ret = 0;
 	if (!config->enabled) {
-		ret = disable_gamma(fd, config->screen);
+		uint32_t table[DISPLAYCAL_LUT_ENTRIES];
+		fill_identity_table(table);
+		ret = apply_table(fd, config->screen, table);
 	} else {
 		uint32_t table[DISPLAYCAL_LUT_ENTRIES];
 		fill_linear_gain_table(table, config);

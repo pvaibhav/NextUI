@@ -20,7 +20,7 @@ include ../platform/makefile.env
 
 TARGET = displaycal
 INCDIR = -I. -I../../all/common/ -I../platform/
-SOURCE = $(TARGET).c ../../all/common/utils.c ../../all/common/api.c ../../all/common/config.c ../../all/common/scaler.c ../platform/platform.c
+SOURCE = $(TARGET).c displaycal_core.c displaycal_ui.c ../../all/common/utils.c ../../all/common/api.c ../../all/common/config.c ../../all/common/scaler.c ../platform/platform.c
 
 CC = $(CROSS_COMPILE)gcc
 CFLAGS += -mcpu=cortex-a53 -flto $(OPT) $(INCDIR) -DPLATFORM=\"$(PLATFORM)\" -std=gnu99

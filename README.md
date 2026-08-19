@@ -108,6 +108,9 @@ When the device is left idle it will enter light sleep. Light sleep turns the sc
 
 After two minutes the device will go into deep sleep. The leds will turn completely off.
 
+Settings > System > Shutdown timeout can optionally power off the device after a
+configured period in deep sleep. The setting is Never by default.
+
 ---
 
 ## What about X feature?

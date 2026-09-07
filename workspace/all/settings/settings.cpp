@@ -632,17 +632,17 @@ int main(int argc, char *argv[])
                 [defaultDisplayCal]() { SetDisplayCalMode(defaultDisplayCal.mode); }};
             displayItems.push_back(colourCorrectionItem);
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Red gain", "Custom colour correction red channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                new MenuItem{ListItemType::Generic, "Red gain", "Red level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
                 { return GetDisplayCalRedGain(); }, [colourCorrectionItem](const std::any &value)
                 { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalRedGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalRedGain(defaultDisplayCal.red_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Green gain", "Custom colour correction green channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                new MenuItem{ListItemType::Generic, "Green gain", "Green level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
                 { return GetDisplayCalGreenGain(); }, [colourCorrectionItem](const std::any &value)
                 { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalGreenGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalGreenGain(defaultDisplayCal.green_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Blue gain", "Custom colour correction blue channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                new MenuItem{ListItemType::Generic, "Blue gain", "Blue level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
                 { return GetDisplayCalBlueGain(); }, [colourCorrectionItem](const std::any &value)
                 { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalBlueGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalBlueGain(defaultDisplayCal.blue_gain); }});

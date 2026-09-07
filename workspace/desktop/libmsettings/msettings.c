@@ -173,10 +173,47 @@ typedef struct SettingsV10 {
 	int displaycal_blue_gain;
 } SettingsV10;
 
+// V11 renames displaycal_enabled to displaycal_mode (OFF/ON/CUSTOM) in place.
+// Layout is identical to V10, and OFF=0/ON=1 match the old flag values.
+typedef struct SettingsV11 {
+	int version; // future proofing
+	int brightness;
+	int colortemperature;
+	int headphones;
+	int speaker;
+	int mute;
+	int contrast;
+	int saturation;
+	int exposure;
+	int toggled_brightness;
+	int toggled_colortemperature;
+	int toggled_contrast;
+	int toggled_saturation;
+	int toggled_exposure;
+	int toggled_volume;
+	int disable_dpad_on_mute;
+	int emulate_joystick_on_mute;
+	int turbo_a;
+	int turbo_b;
+	int turbo_x;
+	int turbo_y;
+	int turbo_l1;
+	int turbo_l2;
+	int turbo_r1;
+	int turbo_r2;
+	int unused[2]; // for future use
+	// NOTE: doesn't really need to be persisted but still needs to be shared
+	int jack;
+	int displaycal_mode;
+	int displaycal_red_gain;
+	int displaycal_green_gain;
+	int displaycal_blue_gain;
+} SettingsV11;
+
 // When incrementing SETTINGS_VERSION, update the Settings typedef and add
 // backwards compatibility to InitSettings!
-#define SETTINGS_VERSION 10
-typedef SettingsV10 Settings;
+#define SETTINGS_VERSION 11
+typedef SettingsV11 Settings;
 static Settings DefaultSettings = {
 	.version = SETTINGS_VERSION,
 	.brightness = SETTINGS_DEFAULT_BRIGHTNESS,
@@ -204,7 +241,7 @@ static Settings DefaultSettings = {
 	.turbo_r1 = 0,
 	.turbo_r2 = 0,
 	.jack = 0,
-	.displaycal_enabled = DISPLAYCAL_DEFAULT_ENABLED,
+	.displaycal_mode = DISPLAYCAL_DEFAULT_MODE,
 	.displaycal_red_gain = DISPLAYCAL_DEFAULT_RED_GAIN,
 	.displaycal_green_gain = DISPLAYCAL_DEFAULT_GREEN_GAIN,
 	.displaycal_blue_gain = DISPLAYCAL_DEFAULT_BLUE_GAIN,
@@ -240,13 +277,23 @@ void InitSettings(void){
 		if(fd) {
 			if (version == SETTINGS_VERSION) {
 				read(fd, msettings, sizeof(Settings));
+				msettings->displaycal_mode = DisplayCal_clampModeValue(msettings->displaycal_mode);
 			}
 			else {
 				// initialize with defaults
 				memcpy(msettings, &DefaultSettings, sizeof(Settings));
-				
+
 				// overwrite with migrated data
-				if(version==9) {
+				if(version==10) {
+					printf("Found settings v10.\n");
+					SettingsV10 old;
+					read(fd, &old, sizeof(SettingsV10));
+
+					memcpy(msettings, &old, sizeof(SettingsV10));
+					msettings->version = SETTINGS_VERSION;
+					msettings->displaycal_mode = DisplayCal_clampModeValue(msettings->displaycal_mode);
+				}
+				else if(version==9) {
 					printf("Found settings v9.\n");
 					SettingsV9 old;
 					read(fd, &old, sizeof(SettingsV9));
@@ -386,8 +433,8 @@ static inline void SaveSettings(void) {
 	}
 }
 static inline void applyDisplayCalSettings(void) {
-	if (msettings->displaycal_enabled)
-		SetRawDisplayCal(1, msettings->displaycal_red_gain, msettings->displaycal_green_gain, msettings->displaycal_blue_gain);
+	if (msettings->displaycal_mode != DISPLAYCAL_MODE_OFF)
+		SetRawDisplayCal(msettings->displaycal_mode, msettings->displaycal_red_gain, msettings->displaycal_green_gain, msettings->displaycal_blue_gain);
 }
 void QuitSettings(void){
 	SaveSettings();
@@ -406,7 +453,7 @@ int GetColortemp(void) { return 0; }
 int GetContrast(void) { return 0; }
 int GetSaturation(void) { return 0; }
 int GetExposure(void) { return 0; }
-int GetDisplayCalEnabled(void) { return msettings->displaycal_enabled; }
+int GetDisplayCalMode(void) { return msettings->displaycal_mode; }
 int GetDisplayCalRedGain(void) { return msettings->displaycal_red_gain; }
 int GetDisplayCalGreenGain(void) { return msettings->displaycal_green_gain; }
 int GetDisplayCalBlueGain(void) { return msettings->displaycal_blue_gain; }
@@ -447,8 +494,8 @@ void SetMuteTurboR1(int value) {}
 void SetMuteTurboR2(int value) {}
 
 void SetRawBrightness(int value) {}
-void SetRawDisplayCal(int enabled, int red_gain, int green_gain, int blue_gain) {
-	printf("SetRawDisplayCal(%i,%i,%i,%i)\n", enabled, red_gain, green_gain, blue_gain); fflush(stdout);
+void SetRawDisplayCal(int mode, int red_gain, int green_gain, int blue_gain) {
+	printf("SetRawDisplayCal(%i,%i,%i,%i)\n", mode, red_gain, green_gain, blue_gain); fflush(stdout);
 }
 void SetRawVolume(int value){}
 
@@ -457,16 +504,16 @@ void SetColortemp(int value) {}
 void SetContrast(int value) {}
 void SetSaturation(int value) {}
 void SetExposure(int value) {}
-void SetDisplayCalEnabled(int is_enabled) {
-	int was_enabled = msettings->displaycal_enabled;
-	is_enabled = (is_enabled != 0);
-	msettings->displaycal_enabled = is_enabled;
+void SetDisplayCalMode(int mode) {
+	int was_off = (msettings->displaycal_mode == DISPLAYCAL_MODE_OFF);
+	mode = DisplayCal_clampModeValue(mode);
+	msettings->displaycal_mode = mode;
 
-	// Disabling only needs raw writes when we are turning an active LUT off.
-	if (is_enabled)
+	// Switching off only needs raw writes when turning an active LUT off.
+	if (mode != DISPLAYCAL_MODE_OFF)
 		applyDisplayCalSettings();
-	else if (was_enabled)
-		SetRawDisplayCal(0, msettings->displaycal_red_gain, msettings->displaycal_green_gain, msettings->displaycal_blue_gain);
+	else if (!was_off)
+		SetRawDisplayCal(DISPLAYCAL_MODE_OFF, msettings->displaycal_red_gain, msettings->displaycal_green_gain, msettings->displaycal_blue_gain);
 	SaveSettings();
 }
 void SetDisplayCalRedGain(int value) {

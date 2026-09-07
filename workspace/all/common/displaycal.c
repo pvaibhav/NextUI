@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -13,8 +14,12 @@
 #define DISP_LCD_GAMMA_CORRECTION_ENABLE  0x10c
 #define DISP_LCD_GAMMA_CORRECTION_DISABLE 0x10d
 
-#define DISPLAYCAL_LUT_ENTRIES 256
 #define DISPLAYCAL_LUT_BYTES   (DISPLAYCAL_LUT_ENTRIES * 4)
+
+#define DISPLAYCAL_CUBE_MAX_LINE 256
+#define DISPLAYCAL_CUBE_MAX_LINES 8192
+#define DISPLAYCAL_CUBE_MAX_BYTES (256 * 1024)
+#define DISPLAYCAL_CUBE_PATH_MAX 512
 
 typedef struct {
 	double red_gain;
@@ -125,6 +130,207 @@ static int apply_gains(const DisplayCalGains *gains) {
 	int ret = apply_table(fd, 0, table);
 	close(fd);
 	return ret;
+}
+
+static int is_cube_space(char c) {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+// Parse exactly three finite doubles and require end-of-line after them.
+static int parse_cube_triplet(const char *s, double out[3]) {
+	for (int i = 0; i < 3; i++) {
+		while (is_cube_space(*s))
+			s++;
+		if (*s == '\0')
+			return -1;
+		char *end = NULL;
+		double value = strtod(s, &end);
+		if (end == s || !isfinite(value))
+			return -1;
+		out[i] = value;
+		s = end;
+	}
+	while (is_cube_space(*s))
+		s++;
+	return *s == '\0' ? 0 : -1;
+}
+
+// Match KEYWORD at the start of s; on success return the pointer just past it.
+static const char *match_cube_keyword(const char *s, const char *keyword) {
+	size_t len = strlen(keyword);
+	if (strncmp(s, keyword, len) != 0)
+		return NULL;
+	if (s[len] != '\0' && !is_cube_space(s[len]))
+		return NULL;
+	return s + len;
+}
+
+int DisplayCal_parseCubeFile(const char *path, uint32_t table[DISPLAYCAL_LUT_ENTRIES]) {
+	if (!path || !table)
+		return -1;
+
+	FILE *file = fopen(path, "r");
+	if (!file) {
+		fprintf(stderr, "displaycal: open %s failed: %s\n", path, strerror(errno));
+		return -1;
+	}
+
+	int size_ok = 0;
+	if (fseek(file, 0, SEEK_END) == 0) {
+		long size = ftell(file);
+		size_ok = (size >= 0 && size <= DISPLAYCAL_CUBE_MAX_BYTES);
+		rewind(file);
+	}
+	if (!size_ok) {
+		fprintf(stderr, "displaycal: %s too large or unreadable\n", path);
+		fclose(file);
+		return -1;
+	}
+
+	double lut[DISPLAYCAL_LUT_ENTRIES][3];
+	int rows = 0;
+	int have_size = 0;
+	long lines = 0;
+	char line[DISPLAYCAL_CUBE_MAX_LINE];
+
+	while (fgets(line, sizeof(line), file)) {
+		if (++lines > DISPLAYCAL_CUBE_MAX_LINES) {
+			fprintf(stderr, "displaycal: %s has too many lines\n", path);
+			goto fail;
+		}
+		size_t len = strlen(line);
+		if (len > 0 && line[len - 1] != '\n' && !feof(file)) {
+			fprintf(stderr, "displaycal: %s has an overlong line\n", path);
+			goto fail;
+		}
+
+		const char *s = line;
+		while (is_cube_space(*s))
+			s++;
+		if (*s == '\0' || *s == '#')
+			continue;
+
+		const char *rest;
+		if ((rest = match_cube_keyword(s, "TITLE")) != NULL) {
+			(void)rest; // display label only
+			continue;
+		}
+		if ((rest = match_cube_keyword(s, "LUT_1D_SIZE")) != NULL) {
+			if (have_size) {
+				fprintf(stderr, "displaycal: %s has a duplicate LUT_1D_SIZE\n", path);
+				goto fail;
+			}
+			char *end = NULL;
+			long size = strtol(rest, &end, 10);
+			while (is_cube_space(*end))
+				end++;
+			if (end == rest || *end != '\0' || size != DISPLAYCAL_LUT_ENTRIES) {
+				fprintf(stderr, "displaycal: %s has unsupported LUT_1D_SIZE (want %d)\n",
+					path, DISPLAYCAL_LUT_ENTRIES);
+				goto fail;
+			}
+			have_size = 1;
+			continue;
+		}
+		if (match_cube_keyword(s, "LUT_3D_SIZE") != NULL) {
+			fprintf(stderr, "displaycal: %s contains a 3D LUT, unsupported\n", path);
+			goto fail;
+		}
+		if ((rest = match_cube_keyword(s, "DOMAIN_MIN")) != NULL) {
+			double d[3];
+			if (parse_cube_triplet(rest, d) != 0 ||
+					fabs(d[0]) > 1e-6 || fabs(d[1]) > 1e-6 || fabs(d[2]) > 1e-6) {
+				fprintf(stderr, "displaycal: %s has a non-zero DOMAIN_MIN\n", path);
+				goto fail;
+			}
+			continue;
+		}
+		if ((rest = match_cube_keyword(s, "DOMAIN_MAX")) != NULL) {
+			double d[3];
+			if (parse_cube_triplet(rest, d) != 0 ||
+					fabs(d[0] - 1.0) > 1e-6 ||
+					fabs(d[1] - 1.0) > 1e-6 ||
+					fabs(d[2] - 1.0) > 1e-6) {
+				fprintf(stderr, "displaycal: %s has a non-identity DOMAIN_MAX\n", path);
+				goto fail;
+			}
+			continue;
+		}
+
+		// Anything else must be a data row after the size header.
+		if (!have_size) {
+			fprintf(stderr, "displaycal: %s has data before LUT_1D_SIZE\n", path);
+			goto fail;
+		}
+		if (rows >= DISPLAYCAL_LUT_ENTRIES) {
+			fprintf(stderr, "displaycal: %s has more than %d data rows\n",
+				path, DISPLAYCAL_LUT_ENTRIES);
+			goto fail;
+		}
+		if (parse_cube_triplet(s, lut[rows]) != 0) {
+			fprintf(stderr, "displaycal: %s has invalid data on line %ld\n", path, lines);
+			goto fail;
+		}
+		rows++;
+	}
+
+	if (ferror(file)) {
+		fprintf(stderr, "displaycal: error reading %s\n", path);
+		goto fail;
+	}
+	if (!have_size) {
+		fprintf(stderr, "displaycal: %s is missing LUT_1D_SIZE\n", path);
+		goto fail;
+	}
+	if (rows != DISPLAYCAL_LUT_ENTRIES) {
+		fprintf(stderr, "displaycal: %s has %d data rows, want %d\n",
+			path, rows, DISPLAYCAL_LUT_ENTRIES);
+		goto fail;
+	}
+
+	for (int i = 0; i < DISPLAYCAL_LUT_ENTRIES; i++) {
+		uint32_t r = clamp_u8(lut[i][0] * 255.0);
+		uint32_t g = clamp_u8(lut[i][1] * 255.0);
+		uint32_t b = clamp_u8(lut[i][2] * 255.0);
+		table[i] = (r << 16) | (g << 8) | b;
+	}
+	fclose(file);
+	return 0;
+
+fail:
+	fclose(file);
+	return -1;
+}
+
+int DisplayCal_enableWithLutFile(const char *path) {
+	uint32_t table[DISPLAYCAL_LUT_ENTRIES];
+	if (DisplayCal_parseCubeFile(path, table) != 0)
+		return -1;
+
+	int fd = open_disp();
+	if (fd < 0)
+		return -1;
+
+	int ret = apply_table(fd, 0, table);
+	close(fd);
+	return ret;
+}
+
+int DisplayCal_enableWithDeviceFile(void) {
+	const char *sdcard = getenv("SDCARD_PATH");
+	const char *device = getenv("DEVICE");
+	if (!sdcard || !*sdcard || !device || !*device) {
+		fprintf(stderr, "displaycal: SDCARD_PATH or DEVICE not set\n");
+		return -1;
+	}
+
+	char path[DISPLAYCAL_CUBE_PATH_MAX];
+	int len = snprintf(path, sizeof(path), "%s/.system/res/displaycal/%s.cube", sdcard, device);
+	if (len < 0 || (size_t)len >= sizeof(path)) {
+		fprintf(stderr, "displaycal: device LUT path too long\n");
+		return -1;
+	}
+	return DisplayCal_enableWithLutFile(path);
 }
 
 int DisplayCal_enableWithValues(int red_gain, int green_gain, int blue_gain) {

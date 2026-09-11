@@ -11,7 +11,7 @@ WPA_ACTION_SCRIPT="$WIFI_RUNTIME_DIR/wpa_action.sh"
 
 write_default_config() {
 	mkdir -p "$WIFI_STATE_DIR" "$WIFI_SOCK_DIR"
-	if [ ! -f "$WPA_SUPPLICANT_CONF" ]; then
+	if [ ! -s "$WPA_SUPPLICANT_CONF" ] || ! grep -q "ctrl_interface=" "$WPA_SUPPLICANT_CONF" 2>/dev/null; then
 		cat > "$WPA_SUPPLICANT_CONF" << EOF
 ctrl_interface=$WIFI_SOCK_DIR
 disable_scan_offload=1
@@ -19,6 +19,8 @@ update_config=1
 wowlan_triggers=any
 
 EOF
+	elif ! grep -q "update_config=1" "$WPA_SUPPLICANT_CONF" 2>/dev/null; then
+		sed -i '1iupdate_config=1' "$WPA_SUPPLICANT_CONF" 2>/dev/null || echo "update_config=1" >> "$WPA_SUPPLICANT_CONF"
 	fi
 }
 
@@ -76,6 +78,7 @@ start() {
 
 	killall wpa_cli 2>/dev/null || true
 	killall wpa_supplicant 2>/dev/null || true
+	rm -f "$WIFI_SOCK_DIR/$WIFI_INTERFACE" 2>/dev/null || true
 	wpa_supplicant -B -i "$WIFI_INTERFACE" -c "$WPA_SUPPLICANT_CONF" -C "$WIFI_SOCK_DIR" >/dev/null 2>&1
 	wpa_cli -B -p "$WIFI_SOCK_DIR" -i "$WIFI_INTERFACE" -a "$WPA_ACTION_SCRIPT" >/dev/null 2>&1 || true
 	start_dhcp
@@ -86,6 +89,7 @@ stop() {
 	killall wpa_cli 2>/dev/null || true
 	systemctl stop wpa_supplicant "wpa_supplicant@$WIFI_INTERFACE.service" 2>/dev/null || true
 	killall wpa_supplicant 2>/dev/null || true
+	rm -f "$WIFI_SOCK_DIR/$WIFI_INTERFACE" 2>/dev/null || true
 	stop_dhcp
 	ip link set "$WIFI_INTERFACE" down 2>/dev/null || true
 	rfkill block wifi 2>/dev/null || true

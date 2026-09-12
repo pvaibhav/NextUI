@@ -201,10 +201,16 @@ int main(int argc , char* argv[]) {
 	Config_readControls(); // restore controls (after the core has reported its defaults)
 
 	// Mute audio during startup to avoid pops (InitSettings would be logical, but too late)
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// H700 settings keep outputs gated until audio actually starts playing.
+	InitSettings();
+#endif
 	SND_overrideMute(1);
 	SND_init(core.sample_rate, core.fps);
 	SND_registerDeviceWatcher(Audio_onSinkChanged);
+#if !defined(SND_TRANSITION_MUTE) || !SND_TRANSITION_MUTE
 	InitSettings(); // after we initialize audio
+#endif
 	Menu_init();
 	Notification_init();
 	
@@ -325,6 +331,10 @@ int main(int argc , char* argv[]) {
 
 		hdmimon();
 	}
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// Disconnect the physical amplifier before exit graphics/core cleanup.
+	SND_overrideMute(1);
+#endif
 	int cw, ch;
 	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
 	
@@ -344,6 +354,12 @@ int main(int argc , char* argv[]) {
 	PLAT_clearTurbo();
 
 	Menu_quit();
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// Settings must still be mapped when the shared output gate is set.
+	SND_overrideMute(1);
+	if (GetAudioSink() == AUDIO_SINK_DEFAULT && !GetHDMI())
+		SND_quit();
+#endif
 	QuitSettings();
 
 finish:

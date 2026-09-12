@@ -832,7 +832,7 @@ int PLAT_pickSampleRate(int requested, int max) {
 }
 
 void PLAT_overrideMute(int mute) {
-	system(mute ? "amixer -q sset 'SPK' off" : "amixer -q sset 'SPK' on");
+	SetAudioMute(mute);
 }
 
 char* PLAT_getModel(void) {

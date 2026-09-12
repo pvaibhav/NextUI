@@ -180,6 +180,7 @@ extern int needs_portrait_sdl; // DEVICE=rg28xx: SDL rotates onto the portrait p
 
 #define SDCARD_PATH "/mnt/SDCARD"
 #define MUTE_VOLUME_RAW 0
+#define SND_TRANSITION_MUTE 1
 
 // Stock H700 audio must be closed before suspend to avoid a long stall on wake.
 #define SND_CLOSE_ON_SLEEP 1

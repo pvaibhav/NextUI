@@ -3172,6 +3172,9 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 
 void SND_init(double sample_rate, double frame_rate)
 { // plat_sound_init
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	SND_overrideMute(1);
+#endif
 	LOG_info("SND_init\n");
 	if(SDL_WasInit(SDL_INIT_AUDIO))
 		LOG_error("SND_init: already initialized\n");
@@ -3248,6 +3251,10 @@ void SND_init(double sample_rate, double frame_rate)
 
 void SND_quit(void)
 {
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// Gate the output before either pausing or closing the PCM.
+	SND_overrideMute(1);
+#endif
 	if (!snd.initialized)
 	{
 		LOG_warn("Skipping SND teardown, not initialized.\n");
@@ -3287,6 +3294,12 @@ void SND_pauseAudio(bool paused)
 	SDL_PauseAudioDevice(snd.device_id, paused);
 #else
 	SDL_PauseAudio(paused);
+#endif
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// Batch submission releases the gate only after buffering enough audio
+	// to start playback. Ordinary underrun pauses do not cycle the amplifier.
+	if (!paused)
+		SND_overrideMute(0);
 #endif
 }
 
@@ -4322,8 +4335,14 @@ void PWR_powerOff(int reboot)
 	}
 }
 
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+static int sleep_had_audio;
+#endif
 static void PWR_enterSleep(void)
 {
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	sleep_had_audio = snd.initialized;
+#endif
 #if defined(SND_CLOSE_ON_SLEEP) && SND_CLOSE_ON_SLEEP
 	// On H700, fully close the audio device before sleeping: a PCM left open
 	// across suspend-to-RAM ends up in a state SDL takes ~10s to close on
@@ -4382,7 +4401,13 @@ static void PWR_exitSleep(void)
 	}
 	// reinitialize audio after sleep otherwise it doesnt come back on sometimes
 	LOG_info("Reinitialize audio after sleep\n");
+#if defined(SND_TRANSITION_MUTE) && SND_TRANSITION_MUTE
+	// A frontend that had no PCM must not acquire one just by waking up.
+	if (sleep_had_audio)
+		SND_resetAudio(snd.sample_rate_in, snd.frame_rate);
+#else
 	SND_resetAudio(snd.sample_rate_in, snd.frame_rate);
+#endif
 
 	sync();
 }

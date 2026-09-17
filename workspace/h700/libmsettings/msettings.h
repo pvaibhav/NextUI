@@ -45,6 +45,7 @@ void SetDisplayCalRedGain(int value); // 0-200, 100 is neutral
 void SetDisplayCalGreenGain(int value); // 0-200, 100 is neutral
 void SetDisplayCalBlueGain(int value); // 0-200, 100 is neutral
 void SetVolume(int value); // 0-20
+void SetAudioMute(int muted); // transient shared output gate; preserves user volume
 
 int GetJack(void);
 void SetJack(int value); // 0-1

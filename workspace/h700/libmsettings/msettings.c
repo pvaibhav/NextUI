@@ -15,6 +15,7 @@
 #include "displaycal.h"
 #include "msettings.h"
 #include "sunxi_display2_min.h"
+#include "speaker_amp.h"
 
 ///////////////////////////////////////
 
@@ -28,7 +29,8 @@ typedef struct SettingsV1 {
 	int contrast;
 	int saturation;
 	int exposure;
-	int unused[2]; // for future use
+	int audio_muted; // runtime gate; uses a reserved slot, not a saved preference
+	int unused; // for future use
 	// NOTE: doesn't really need to be persisted but still needs to be shared
 	int jack;
 	int audiosink; // AUDIO_SINK_*
@@ -50,6 +52,7 @@ static Settings DefaultSettings = {
 	.contrast = SETTINGS_DEFAULT_CONTRAST,
 	.saturation = SETTINGS_DEFAULT_SATURATION,
 	.exposure = SETTINGS_DEFAULT_EXPOSURE,
+	.audio_muted = 1,
 	.jack = 0,
 	.audiosink = AUDIO_SINK_DEFAULT,
 	.displaycal_enabled = DISPLAYCAL_DEFAULT_ENABLED,
@@ -169,15 +172,17 @@ void InitSettings(void) {
 
 		memcpy(settings, &DefaultSettings, shm_size);
 		loadSettings();
+		// Playback never survives a session restart. Do not restore this gate
+		// from the settings file alongside the user's volume preference.
+		settings->audio_muted = 1;
 	}
 	// printf("brightness: %i\nspeaker: %i \n", settings->brightness, settings->speaker);
 	// Log mixer state before changing routing to help diagnose Bluetooth/USB DAC issues.
 	system("amixer");
 
-	// Make sure the H700 codec is routed to speaker/lineout before NextUI owns volume.
+	// Set DAC routing here; SetVolume owns the output switches. Enabling SPK
+	// here would briefly unmute a zero-volume device on every app transition.
 	if(GetAudioSink() == AUDIO_SINK_DEFAULT) {
-		system("amixer -q sset 'SPK' on >/dev/null 2>&1");
-		system("amixer -q sset 'LINEOUT' on >/dev/null 2>&1");
 		system("amixer -q sset 'OutputL Mixer DACL' on >/dev/null 2>&1");
 		system("amixer -q sset 'OutputR Mixer DACR' on >/dev/null 2>&1");
 	}
@@ -197,6 +202,7 @@ int InitializedSettings(void) {
 }
 void QuitSettings(void) {
 	munmap(settings, shm_size);
+	settings = NULL;
 	if (is_host) shm_unlink(SHM_KEY);
 }
 static inline void SaveSettings(void) {
@@ -339,6 +345,16 @@ void SetVolume(int value) // 0-20
 	else
 		settings->speaker = value;
 	SaveSettings();
+}
+void SetAudioMute(int muted) {
+	if (!settings) return;
+	muted = !!muted;
+	if (settings->audio_muted == muted) return;
+	settings->audio_muted = muted;
+	// Keep the transition gate shared with keymon without changing the
+	// saved volume or touching Bluetooth/USB/HDMI volume controls.
+	if (GetAudioSink() == AUDIO_SINK_DEFAULT && !GetHDMI())
+		SetRawVolume(scaleVolume(GetVolume()));
 }
 // TODO: wire up headphone-jack detection in H700 keymon.
 void SetJack(int value) {
@@ -878,6 +894,10 @@ void SetRawVolume(int val) { // in: 0-100
 	}
 	else {
 		// Speaker path: grab the card that is called "audiocodec"
+		int physical_amp = speakerAmpSupported();
+		int muted = val == 0 || settings->audio_muted;
+		if (physical_amp && muted && speakerAmpSet(0) < 0)
+			fprintf(stderr, "Failed to disable RG SP physical amplifier\n");
 		int card_num = get_audiocodec_card_num();
 		if(card_num < 0) {
 			card_num = 0; // fallback to card 0 if we can't find it
@@ -889,10 +909,24 @@ void SetRawVolume(int val) { // in: 0-100
             return;
         }
 
+        // TinyALSA takes raw control names, not amixer's simple-control names.
+        // Disable the speaker before changing the line output or its gain.
+        struct mixer_ctl *spk = mixer_get_ctl_by_name(mixer, "SPK Switch");
+        struct mixer_ctl *lineout_switch = mixer_get_ctl_by_name(mixer, "LINEOUT Switch");
+        if (muted && !physical_amp) {
+            if (spk && mixer_ctl_set_value(spk, 0, 0) < 0)
+                fprintf(stderr, "Failed to mute SPK Switch\n");
+            if (lineout_switch && mixer_ctl_set_value(lineout_switch, 0, 0) < 0)
+                fprintf(stderr, "Failed to mute LINEOUT Switch\n");
+        }
+
         struct mixer_ctl *digital = mixer_get_ctl_by_name(mixer, "digital volume");
-        if (digital) {
-			mixer_ctl_set_percent(digital, 0, 100 - val); // reversed mapping
-			//printf("Set 'digital volume' to %d%%\n", val); fflush(stdout);
+        if (digital && mixer_ctl_get_value(digital, 0) != 63) {
+			// Stock's PCM hook holds this at 63 (100%); the lineout control
+			// owns volume. Once the hook is removed, the old inverted mapping
+			// attenuates playback as the user raises the volume.
+			if (mixer_ctl_set_percent(digital, 0, 100) < 0)
+				fprintf(stderr, "Failed to set digital volume\n");
 		}
 
 		struct mixer_ctl *lineout = mixer_get_ctl_by_name(mixer, "lineout volume");
@@ -901,13 +935,16 @@ void SetRawVolume(int val) { // in: 0-100
 			//printf("Set 'lineout volume' to %d%%\n", val); fflush(stdout);
 		}
 
-		struct mixer_ctl *spk = mixer_get_ctl_by_name(mixer, "SPK");
-		if (spk)
-			mixer_ctl_set_value(spk, 0, val == 0 ? 0 : 1);
+        // Restore the line output before the speaker, once gain is configured.
+        if (!muted && !physical_amp) {
+            if (lineout_switch && mixer_ctl_set_value(lineout_switch, 0, 1) < 0)
+                fprintf(stderr, "Failed to enable LINEOUT Switch\n");
+            if (spk && mixer_ctl_set_value(spk, 0, 1) < 0)
+                fprintf(stderr, "Failed to enable SPK Switch\n");
+        }
 
-		struct mixer_ctl *lineout_switch = mixer_get_ctl_by_name(mixer, "LINEOUT");
-		if (lineout_switch)
-			mixer_ctl_set_value(lineout_switch, 0, val == 0 ? 0 : 1);
+        if (!muted && physical_amp && speakerAmpSet(1) < 0)
+            fprintf(stderr, "Failed to enable RG SP physical amplifier\n");
 
 		mixer_close(mixer);
 	}

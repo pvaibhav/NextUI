@@ -9,7 +9,18 @@ cd "$controlfolder" || exit 1
 for file in "$PORTS_DIR"/autoinstall/*.squashfs; do
   [ -f "$file" ] && mv -f "$file" "$controlfolder/libs/"
 done
+for file in "$PORTS_DIR"/autoinstall/runtimes*.zip; do
+  [ -f "$file" ] || continue
+  # Runtime bundles name their architecture in the zip comment (old ones don't).
+  arch="$(unzip -z "$file" | tail -n1 | cut -d' ' -f1)"
+  if [ "$arch" = "$DEVICE_ARCH" ] || [ "$arch" = "Archive:" ]; then
+    unzip -q -o "$file" -d "$controlfolder/libs" && rm -f "$file"
+  else
+    echo "Skipping $file: it is for $arch"
+  fi
+done
 for file in "$PORTS_DIR"/autoinstall/*.zip; do
+  case "${file##*/}" in runtimes*.zip) continue ;; esac
   [ -f "$file" ] && python3 ./harbourmaster --quiet --no-check install "$file" && rm -f "$file"
 done
 

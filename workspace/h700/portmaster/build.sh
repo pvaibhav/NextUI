@@ -1,11 +1,15 @@
 #!/bin/sh
 # Build the private runtime for PORTS.pak (PortMaster support) without relying
-# on the OS: GNU bash and command-line tools, Python 3.10, and current
-# SDL2_image, SDL2_mixer and SDL2_ttf. SDL2 itself is NextUI's.
+# on the OS: GNU bash and command-line tools, Python 3.10, current SDL2 add-on
+# libraries, FFmpeg 4, libcurl and other libraries ports expect. SDL2 itself is
+# NextUI's.
 #
-# The tools and Python are Ubuntu 22.04 arm64 packages (debs.txt, pinned by
-# SHA-256). Stock Anbernic OS, StockMod and BaseOS all use Ubuntu 22.04's glibc,
-# so they run unchanged. To update a package, replace its line in debs.txt.
+# The tools, Python and common game libraries are Ubuntu 22.04 arm64 packages
+# (debs.txt; debs-build.txt holds build-only ones), fetched from Launchpad's
+# permanent archive and pinned by SHA-256. Stock Anbernic OS, StockMod and BaseOS
+# all use Ubuntu 22.04's glibc, so they run unchanged. debs-compat.txt adds the
+# older Debian 11 libraries many ports were built against (as dArkOS does).
+# To update a package, replace its line in the list.
 #
 # The SD card is FAT, so the output holds no symlinks: libraries are copied
 # under their soname and command aliases become copies.
@@ -14,20 +18,28 @@ set -eu
 : "${CROSS_COMPILE:?CROSS_COMPILE is required}"
 : "${PREFIX_LOCAL:?PREFIX_LOCAL is required}"
 
-UBUNTU_MIRROR=http://ports.ubuntu.com/ubuntu-ports
+UBUNTU_FILES=https://launchpad.net/ubuntu/+archive/primary/+files
+DEBIAN_ARCHIVE=https://archive.debian.org/debian
 SDL2_MIXER_VERSION=2.8.0
 SDL2_MIXER_SHA256=1cfb34c87b26dbdbc7afd68c4f545c0116ab5f90bbfecc5aebe2a9cb4bb31549
 SDL2_IMAGE_VERSION=2.8.2
 SDL2_IMAGE_SHA256=8f486bbfbcf8464dd58c9e5d93394ab0255ce68b51c5a966a918244820a76ddc
 SDL2_TTF_VERSION=2.22.0
 SDL2_TTF_SHA256=d48cbd1ce475b9e178206bf3b72d56b66d84d44f64ac05803328396234d67723
+SDL2_NET_VERSION=2.2.0
+SDL2_NET_SHA256=4e4a891988316271974ff4e9585ed1ef729a123d22c08bd473129179dc857feb
+FFMPEG_VERSION=4.4.5 # 4.x is what ports link against (libavcodec.so.58)
+FFMPEG_SHA256=f9514e0d3515aee5a271283df71636e1d1ff7274b15853bcd84e144be416ab07
+CURL_VERSION=8.21.0
+CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
 THEORA_VERSION=1.1.1 # 1.2 renamed the libraries that games link against
 THEORA_SHA256=40952956c47811928d1e7922cda3bc1f427eb75680c3c37249c91e949054916b
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 DEB_DIR="$SCRIPT_DIR/debs"
 ROOT="$SCRIPT_DIR/root"
 OUTPUT_DIR="$SCRIPT_DIR/output"
-STAMP="$OUTPUT_DIR/.stamp-$(cat "$SCRIPT_DIR/build.sh" "$SCRIPT_DIR/debs.txt" | sha256sum | cut -c1-16)"
+BUILD_ROOT="$SCRIPT_DIR/build-root"
+STAMP="$OUTPUT_DIR/.stamp-$(cat "$SCRIPT_DIR/build.sh" "$SCRIPT_DIR"/debs*.txt | sha256sum | cut -c1-16)"
 
 if [ -f "$STAMP" ]; then
 	exit 0
@@ -42,15 +54,23 @@ download() { # url sha256 file
 }
 
 ## 1. Ubuntu packages
+extract_debs() { # list dir url-prefix (Ubuntu files are addressed by name)
+	while read -r path sha; do
+		[ -n "$path" ] || continue
+		deb="$DEB_DIR/${path##*/}"
+		case "$3" in
+			"$UBUNTU_FILES") download "$3/${path##*/}" "$sha" "$deb" ;;
+			*) download "$3/$path" "$sha" "$deb" ;;
+		esac
+		dpkg-deb -x "$deb" "$2"
+	done < "$1"
+}
 mkdir -p "$DEB_DIR"
-rm -rf "$ROOT" "$OUTPUT_DIR"
-mkdir -p "$ROOT" "$OUTPUT_DIR/bin" "$OUTPUT_DIR/lib"
-while read -r path sha; do
-	[ -n "$path" ] || continue
-	deb="$DEB_DIR/${path##*/}"
-	download "$UBUNTU_MIRROR/$path" "$sha" "$deb"
-	dpkg-deb -x "$deb" "$ROOT"
-done < "$SCRIPT_DIR/debs.txt"
+rm -rf "$ROOT" "$BUILD_ROOT" "$OUTPUT_DIR"
+mkdir -p "$ROOT" "$BUILD_ROOT" "$OUTPUT_DIR/bin" "$OUTPUT_DIR/lib"
+extract_debs "$SCRIPT_DIR/debs.txt" "$ROOT" "$UBUNTU_FILES"
+extract_debs "$SCRIPT_DIR/debs-compat.txt" "$ROOT" "$DEBIAN_ARCHIVE"
+extract_debs "$SCRIPT_DIR/debs-build.txt" "$BUILD_ROOT" "$UBUNTU_FILES"
 
 # Commands: every executable in the packages' bin directories, as real files.
 for dir in bin sbin usr/bin usr/sbin; do
@@ -58,7 +78,7 @@ for dir in bin sbin usr/bin usr/sbin; do
 	for f in "$ROOT/$dir"/*; do
 		name=${f##*/}
 		case "$name" in
-			bashbug|rbash|python3.10-config) continue ;;
+			bashbug|rbash|python3.10-config|ldconfig*) continue ;;
 		esac
 		[ -e "$f" ] && cp -L "$f" "$OUTPUT_DIR/bin/$name"
 	done
@@ -88,6 +108,10 @@ for dir in "$ROOT/lib/aarch64-linux-gnu" "$ROOT/usr/lib/aarch64-linux-gnu"; do
 		[ -n "$soname" ] && cp -L "$f" "$OUTPUT_DIR/lib/$soname"
 	done
 done
+
+# PulseAudio keeps a private library in a subfolder; ports only need
+# libpulse to load (their sound goes through ALSA).
+cp -L "$ROOT"/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-*.so "$OUTPUT_DIR/lib/"
 
 # Python standard library, without tests, GUI and packaging extras.
 cp -r "$ROOT/usr/lib/python3.10" "$OUTPUT_DIR/lib/python3.10"
@@ -127,8 +151,53 @@ build_sdl_lib SDL_mixer SDL2_mixer "$SDL2_MIXER_VERSION" "$SDL2_MIXER_SHA256" \
 	--disable-music-gme --disable-music-wavpack
 build_sdl_lib SDL_ttf SDL2_ttf "$SDL2_TTF_VERSION" "$SDL2_TTF_SHA256" \
 	--enable-freetype-builtin --disable-harfbuzz
+build_sdl_lib SDL_net SDL2_net "$SDL2_NET_VERSION" "$SDL2_NET_SHA256"
 
-## 3. Theora video (Love2D games need it). Ubuntu's build pulls in cairo and X11.
+## 3. FFmpeg 4 (libraries plus the ffmpeg and ffprobe commands) with only its
+## own codecs, and libcurl using the OS's OpenSSL 3.
+## Ubuntu's builds pull in dozens of codec, Kerberos and LDAP libraries.
+unpack() { # url sha256 archive
+	download "$1" "$2" "$DEB_DIR/$3"
+	rm -rf "$SCRIPT_DIR/${3%.tar.*}"
+	tar -xf "$DEB_DIR/$3" -C "$SCRIPT_DIR"
+}
+unpack "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256" "ffmpeg-$FFMPEG_VERSION.tar.xz"
+(
+	cd "$SCRIPT_DIR/ffmpeg-$FFMPEG_VERSION"
+	./configure --prefix="$SCRIPT_DIR/sdl-prefix" --enable-cross-compile \
+		--cross-prefix="$CROSS_COMPILE" --arch=aarch64 --target-os=linux \
+		--enable-shared --disable-static --disable-ffplay --disable-doc \
+		--disable-avdevice --disable-postproc --disable-network \
+		--disable-autodetect --enable-zlib >/dev/null
+	make -s -j"$(nproc)"
+	make -s install
+)
+unpack "https://curl.se/download/curl-$CURL_VERSION.tar.xz" "$CURL_SHA256" "curl-$CURL_VERSION.tar.xz"
+(
+	cd "$SCRIPT_DIR/curl-$CURL_VERSION"
+	# Link against Ubuntu 22.04's OpenSSL 3, which is newer than the toolchain's
+	# glibc; the device has both. Versioned symbols match Ubuntu's libcurl4.
+	CPPFLAGS="-I$BUILD_ROOT/usr/include -I$BUILD_ROOT/usr/include/aarch64-linux-gnu" \
+	LDFLAGS="-L$BUILD_ROOT/usr/lib/aarch64-linux-gnu -Wl,--allow-shlib-undefined" \
+	./configure -q --host="${CROSS_COMPILE%-}" --prefix="$SCRIPT_DIR/sdl-prefix" \
+		--disable-static --with-openssl --with-zlib --enable-versioned-symbols \
+		--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --without-libpsl \
+		--without-libidn2 --without-brotli --without-zstd --without-nghttp2 \
+		--without-libssh2 --disable-ldap --disable-ldaps --disable-manual
+	make -s -j"$(nproc)"
+	make -s install
+)
+for prog in ffmpeg ffprobe; do
+	cp "$SCRIPT_DIR/sdl-prefix/bin/$prog" "$OUTPUT_DIR/bin/"
+	"${CROSS_COMPILE}strip" "$OUTPUT_DIR/bin/$prog"
+done
+for lib in libavcodec.so.58 libavformat.so.58 libavutil.so.56 libswscale.so.5 \
+	libswresample.so.3 libavfilter.so.7 libcurl.so.4; do
+	cp -L "$SCRIPT_DIR/sdl-prefix/lib/$lib" "$OUTPUT_DIR/lib/"
+	"${CROSS_COMPILE}strip" --strip-unneeded "$OUTPUT_DIR/lib/$lib"
+done
+
+## 4. Theora video (Love2D games need it). Ubuntu's build pulls in cairo and X11.
 THEORA_ARCHIVE="$DEB_DIR/libtheora-$THEORA_VERSION.tar.gz"
 download "https://downloads.xiph.org/releases/theora/libtheora-$THEORA_VERSION.tar.gz" "$THEORA_SHA256" "$THEORA_ARCHIVE"
 rm -rf "$SCRIPT_DIR/libtheora-$THEORA_VERSION"
@@ -158,6 +227,6 @@ find "$OUTPUT_DIR" -type l | while read -r link; do
 	fi
 done
 
-rm -rf "$ROOT"
+rm -rf "$ROOT" "$BUILD_ROOT"
 touch "$STAMP"
 du -sh "$OUTPUT_DIR"

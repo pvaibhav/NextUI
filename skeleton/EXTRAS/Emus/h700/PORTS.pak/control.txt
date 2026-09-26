@@ -50,6 +50,9 @@ export GODOT2_OPTS="-r ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} -f"
 # The Mali driver only does OpenGL ES, and Love2D games crash if they try
 # desktop OpenGL first.
 export LOVE_GRAPHICS_USE_OPENGLES=1
+# Ports under PortMaster's Weston draw through NextUI's SDL, which isn't in
+# the standard library folders its wrapper searches.
+export CRUSTY_LIBSDL="$SYSTEM_PATH/lib/libSDL2-2.0.so.0"
 
 source "$controlfolder/funcs.txt"
 

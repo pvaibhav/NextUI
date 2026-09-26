@@ -4,3 +4,7 @@
 /sdl-prefix/
 /SDL2_*-*/
 /libtheora-*/
+/build-root/
+/ffmpeg-*/
+/curl-*/
+/build.log

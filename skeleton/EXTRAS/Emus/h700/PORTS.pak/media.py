@@ -44,13 +44,28 @@ for port_json in ports.glob("*/port.json"):
         if item.endswith(".sh") and image and (scripts / item).is_file():
             wanted[item[:-3] + ".png"] = image
 
+# Only touch box art this script made (listed in the manifest): never the
+# folder's bg.png or bglist.png, subfolder art, or covers the user replaced.
+manifest = media / ".portmaster-art"
+try:
+    owned = set(manifest.read_text().split("\n")) - {""}
+except OSError:
+    owned = set()
+
 media.mkdir(exist_ok=True)
 for name, image in wanted.items():
     target = media / name
-    if not target.exists() or target.stat().st_size != image.stat().st_size:
+    if not target.exists() or (name in owned and target.stat().st_size != image.stat().st_size):
         shutil.copyfile(image, target)
+        owned.add(name)
 
-# Remove box art left behind by uninstalled ports (ours only: they came from Ports/).
-for target in media.glob("*.png"):
-    if target.name not in wanted and not (scripts / (target.stem + ".sh")).exists():
-        target.unlink()
+# Remove box art we made for ports that have since been uninstalled.
+for name in sorted(owned):
+    if name not in wanted and not (scripts / (name[:-4] + ".sh")).exists():
+        try:
+            (media / name).unlink()
+        except FileNotFoundError:
+            pass
+        owned.discard(name)
+
+manifest.write_text("".join(n + "\n" for n in sorted(owned)))

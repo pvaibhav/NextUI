@@ -46,7 +46,7 @@ early: $(REQUIRES_EVTEST) $(REQUIRES_JSTEST) $(REQUIRES_UNZIP60) $(REQUIRES_FILE
 curl-runtime: curl/build.sh
 	cd curl && sh build.sh
 
-portmaster-runtime: portmaster/build.sh portmaster/debs.txt
+portmaster-runtime: portmaster/build.sh portmaster/debs.txt portmaster/debs-compat.txt portmaster/debs-build.txt
 	cd portmaster && sh build.sh
 
 clean:
@@ -54,7 +54,7 @@ clean:
 	cd $(REQUIRES_UNZIP60) && make -f unix/Makefile.trimuismart clean
 	rm -rf $(REQUIRES_SDL2)/output
 	rm -rf curl/output curl/curl-* curl/musl-* curl/openssl-*
-	rm -rf portmaster/output portmaster/debs portmaster/root portmaster/SDL2_*-* portmaster/libtheora-* portmaster/sdl-prefix
+	rm -rf portmaster/output portmaster/debs portmaster/root portmaster/SDL2_*-* portmaster/libtheora-* portmaster/ffmpeg-* portmaster/curl-* portmaster/build-root portmaster/sdl-prefix
 	rm -rf boot/output
 
 ###########################################################

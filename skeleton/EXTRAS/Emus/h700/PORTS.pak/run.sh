@@ -20,5 +20,16 @@ fi
 
 case "${1##*/}" in
 	*PortMaster.sh) exec bash "$PAK_DIR/portmaster.sh" ;;
-	*) exec bash "$1" ;;
 esac
+
+# Ports that run under PortMaster's Weston need udev's device descriptions,
+# and it creates a stand-in DRM device node, kept private here.
+if grep -q westonwrap "$1" 2>/dev/null; then
+	mkdir -p /dev/dri && mount -t tmpfs weston-dri /dev/dri
+	sh "$PAK_DIR/udev.sh" &
+	udev=$!
+	bash "$1"
+	kill "$udev"
+	exit
+fi
+exec bash "$1"

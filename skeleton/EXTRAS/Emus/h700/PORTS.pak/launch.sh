@@ -40,7 +40,8 @@ if [ ! -f "$PM_DIR/pugwash" ]; then
 	if [ ! -f "$ZIP" ]; then
 		ZIP=/tmp/PortMaster.zip
 		show "Downloading PortMaster..."
-		if ! curl -fsSL --connect-timeout 10 -o "$ZIP" "$PM_URL"; then
+		# Give up on a stalled download instead of waiting minutes.
+		if ! curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 -o "$ZIP" "$PM_URL"; then
 			rm -f "$ZIP"
 			show "Couldn't download PortMaster. Connect to Wi-Fi in Settings and try again." 5
 			exit 1
@@ -48,13 +49,13 @@ if [ ! -f "$PM_DIR/pugwash" ]; then
 	fi
 	show "Installing PortMaster..."
 	mkdir -p "$XDG_DATA_HOME"
-	unzip -q -o "$ZIP" -d "$XDG_DATA_HOME"
-	rm -f /tmp/PortMaster.zip "$PORTS_DIR/PortMaster.zip"
-	killall show2.elf 2>/dev/null
-	if [ ! -f "$PM_DIR/pugwash" ]; then
+	if ! unzip -q -o "$ZIP" -d "$XDG_DATA_HOME" || [ ! -f "$PM_DIR/pugwash" ]; then
+		rm -f /tmp/PortMaster.zip
 		show "PortMaster didn't install correctly. Please try again." 5
 		exit 1
 	fi
+	rm -f /tmp/PortMaster.zip "$PORTS_DIR/PortMaster.zip"
+	killall show2.elf 2>/dev/null
 fi
 
 # PortMaster updates replace control.txt, so put NextUI's back every time.

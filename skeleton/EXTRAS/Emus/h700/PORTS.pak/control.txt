@@ -8,6 +8,9 @@
 CUR_TTY=/dev/null
 
 export controlfolder="$XDG_DATA_HOME/PortMaster"
+# NextUI's model name; get_controls below reuses DEVICE for the pad's ID, and
+# some ports read this file again after calling it.
+export NEXTUI_DEVICE="${NEXTUI_DEVICE:-$DEVICE}"
 # Ports keep their files in /$directory/ports/<game>, the Ports folder on the card.
 export directory="${PORTS_DIR%/*}"
 export directory="${directory#/}"
@@ -40,7 +43,7 @@ source "$controlfolder/device_info.txt"
 export CFW_NAME="NextUI"
 # PortMaster doesn't know every H700 model, so set what ports rely on here.
 export DEVICE_CPU="h700"
-case "$DEVICE" in
+case "$NEXTUI_DEVICE" in
   rg28xx|rg34xx|rg35xxplus|rg35xxsp|rgsp) export ANALOG_STICKS=0 ;;
   rg40xxv) export ANALOG_STICKS=1 ;;
   *) export ANALOG_STICKS=2 ;;
@@ -53,6 +56,16 @@ export LOVE_GRAPHICS_USE_OPENGLES=1
 # Ports under PortMaster's Weston draw through NextUI's SDL, which isn't in
 # the standard library folders its wrapper searches.
 export CRUSTY_LIBSDL="$SYSTEM_PATH/lib/libSDL2-2.0.so.0"
+# That wrapper also replaces the game's library path, and NextUI's SDL needs a
+# library from its own folder. It reads this file twice, so add it only once
+# and keep any value the port set.
+case ":$WRAPPED_LIBRARY_PATH_MALI:" in
+  *":$SYSTEM_PATH/lib:"*) ;;
+  *) export WRAPPED_LIBRARY_PATH_MALI="${WRAPPED_LIBRARY_PATH_MALI:+$WRAPPED_LIBRARY_PATH_MALI:}$SYSTEM_PATH/lib" ;;
+esac
+# .NET ports (and PortMaster's GameMaker patcher) need ICU for languages and
+# formats unless .NET runs without it; none of the OSes ships ICU.
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
 source "$controlfolder/funcs.txt"
 

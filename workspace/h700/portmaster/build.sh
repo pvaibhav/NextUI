@@ -32,6 +32,8 @@ FFMPEG_VERSION=4.4.5 # 4.x is what ports link against (libavcodec.so.58)
 FFMPEG_SHA256=f9514e0d3515aee5a271283df71636e1d1ff7274b15853bcd84e144be416ab07
 CURL_VERSION=8.21.0
 CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
+PATCHELF_VERSION=0.18.0 # static x86-64 build, runs in the toolchain container
+PATCHELF_SHA256=ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0
 THEORA_VERSION=1.1.1 # 1.2 renamed the libraries that games link against
 THEORA_SHA256=40952956c47811928d1e7922cda3bc1f427eb75680c3c37249c91e949054916b
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
@@ -97,6 +99,33 @@ while [ $# -gt 0 ]; do
 	esac
 done
 exec "$@"
+EOF
+# ar, for ports that unpack .deb files: list (t), extract (x), print (p).
+cat > "$OUTPUT_DIR/bin/ar" <<'EOF'
+#!/usr/bin/env python3
+import os, sys
+if len(sys.argv) < 3:
+    sys.exit("usage: ar t|x|p[v] archive [member...]")
+op, archive, wanted = sys.argv[1].lstrip("-"), sys.argv[2], set(sys.argv[3:])
+with open(archive, "rb") as f:
+    if f.read(8) != b"!<arch>\n":
+        sys.exit(f"ar: {archive}: not an ar archive")
+    while header := f.read(60):
+        name = header[:16].decode().strip().rstrip("/")
+        size = int(header[48:58])
+        data = f.read(size)
+        f.read(size % 2)
+        if name in ("", "/", "//") or (wanted and name not in wanted):
+            continue
+        if "t" in op:
+            print(name)
+        elif "p" in op:
+            sys.stdout.buffer.write(data)
+        elif "x" in op:
+            if "v" in op:
+                print(f"x - {name}")
+            with open(os.path.basename(name), "wb") as out:
+                out.write(data)
 EOF
 chmod 755 "$OUTPUT_DIR/bin"/*
 
@@ -217,6 +246,26 @@ for lib in libtheoradec.so.1 libtheora.so.0; do
 	"${CROSS_COMPILE}strip" --strip-unneeded "$OUTPUT_DIR/lib/$lib"
 done
 
+## 5. Let the pak's programs and libraries find each other even when a port
+## replaces LD_LIBRARY_PATH, as PortMaster's Weston wrapper does. The search
+## path goes after LD_LIBRARY_PATH, so ports' own libraries still come first.
+PATCHELF_ARCHIVE="$DEB_DIR/patchelf-$PATCHELF_VERSION-x86_64.tar.gz"
+download "https://github.com/NixOS/patchelf/releases/download/$PATCHELF_VERSION/patchelf-$PATCHELF_VERSION-x86_64.tar.gz" \
+	"$PATCHELF_SHA256" "$PATCHELF_ARCHIVE"
+mkdir -p "$SCRIPT_DIR/patchelf"
+tar -xzf "$PATCHELF_ARCHIVE" -C "$SCRIPT_DIR/patchelf" ./bin/patchelf
+set_runpath() { # runpath files...
+	runpath=$1
+	shift
+	for f in "$@"; do
+		[ -f "$f" ] && [ ! -L "$f" ] && head -c4 "$f" | grep -q ELF || continue
+		"$SCRIPT_DIR/patchelf/bin/patchelf" --page-size 4096 --set-rpath "$runpath" "$f"
+	done
+}
+set_runpath '$ORIGIN/../lib' "$OUTPUT_DIR"/bin/*
+set_runpath '$ORIGIN' "$OUTPUT_DIR"/lib/*.so*
+set_runpath '$ORIGIN/../..' "$OUTPUT_DIR"/lib/python3.10/lib-dynload/*.so
+
 # FAT has no symlinks: replace any left with the file itself, or drop dangling
 # ones (Debian's sitecustomize.py points into /etc).
 find "$OUTPUT_DIR" -type l | while read -r link; do
@@ -227,6 +276,6 @@ find "$OUTPUT_DIR" -type l | while read -r link; do
 	fi
 done
 
-rm -rf "$ROOT" "$BUILD_ROOT"
+rm -rf "$ROOT" "$BUILD_ROOT" "$SCRIPT_DIR/patchelf"
 touch "$STAMP"
 du -sh "$OUTPUT_DIR"

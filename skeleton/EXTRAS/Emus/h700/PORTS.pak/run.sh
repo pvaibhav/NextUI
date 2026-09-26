@@ -26,10 +26,13 @@ esac
 # and it creates a stand-in DRM device node, kept private here.
 if grep -q westonwrap "$1" 2>/dev/null; then
 	mkdir -p /dev/dri && mount -t tmpfs weston-dri /dev/dri
+	# Its GL layer links the SDL library into /tmp once and never updates it.
+	rm -f /tmp/CRUSTY_LIB*.so
 	sh "$PAK_DIR/udev.sh" &
 	udev=$!
 	bash "$1"
 	kill "$udev"
+	umount /dev/dri && rmdir /dev/dri 2>/dev/null
 	exit
 fi
 exec bash "$1"

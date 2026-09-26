@@ -28,3 +28,5 @@ $(PLATFORM):
 	# extras
 	cp ./workspace/$@/other/NextCommander/output/NextCommander ./build/EXTRAS/Tools/$@/Files.pak/
 	cp -r ./workspace/$@/other/NextCommander/res ./build/EXTRAS/Tools/$@/Files.pak/
+	# PortMaster: private bash, GNU tools, Python and SDL2_mixer for ports
+	cp -r ./workspace/$@/portmaster/output/bin ./workspace/$@/portmaster/output/lib ./build/EXTRAS/Emus/$@/PORTS.pak/

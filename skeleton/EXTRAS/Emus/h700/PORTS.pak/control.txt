@@ -1,0 +1,68 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: MIT
+#
+# NextUI on Anbernic H700 handhelds. PORTS.pak copies this over PortMaster's own
+# control.txt before every launch; every port sources it.
+
+CUR_TTY=/dev/null
+
+export controlfolder="$XDG_DATA_HOME/PortMaster"
+# Ports keep their files in /$directory/ports/<game>, the Ports folder on the card.
+export directory="${PORTS_DIR%/*}"
+export directory="${directory#/}"
+
+# NextUI runs everything as root.
+export ESUDO=""
+export ESUDOKILL="-1"
+export ESUDOKILL2="-1"
+# Bind mounts, not symlinks: the card is FAT and holds $HOME.
+export PM_CAN_MOUNT="Y"
+export PYSDL2_DLL_PATH="$PAK_DIR/lib:$SYSTEM_PATH/lib"
+
+export SDL_GAMECONTROLLERCONFIG_FILE="$controlfolder/gamecontrollerdb.txt"
+SDLDBFILE="$SDL_GAMECONTROLLERCONFIG_FILE"
+SDLDBUSERFILE="$HOME/.config/SDL-GameControllerDB/gamecontrollerdb.txt"
+[ ! -f "$SDLDBUSERFILE" ] && SDLDBUSERFILE="$SDL_GAMECONTROLLERCONFIG_FILE"
+
+get_controls() {
+  LOWRES="N"
+  ANALOGSTICKS="$ANALOG_STICKS"
+  # NextUI's SDL already maps the built-in controls; this is the same mapping.
+  DEVICE="19000000010000000100000000016e01"
+  param_device="anbernic"
+  sdl_controllerconfig="19000000010000000100000000016e01,ANBERNIC-keys,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,back:b6,start:b7,guide:b8,leftstick:b9,rightstick:b10,lefttrigger:a2,righttrigger:a5,leftx:a0,lefty:a1,rightx:a3,righty:a4,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
+}
+
+source "$controlfolder/device_info.txt"
+
+# Same on stock OS, StockMod and BaseOS; ports look for mod_NextUI.txt.
+export CFW_NAME="NextUI"
+# PortMaster doesn't know every H700 model, so set what ports rely on here.
+export DEVICE_CPU="h700"
+case "$DEVICE" in
+  rg28xx|rg34xx|rg35xxplus|rg35xxsp|rgsp) export ANALOG_STICKS=0 ;;
+  rg40xxv) export ANALOG_STICKS=1 ;;
+  *) export ANALOG_STICKS=2 ;;
+esac
+export GODOT_OPTS="--resolution ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} -f"
+export GODOT2_OPTS="-r ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} -f"
+# The Mali driver only does OpenGL ES, and Love2D games crash if they try
+# desktop OpenGL first.
+export LOVE_GRAPHICS_USE_OPENGLES=1
+
+source "$controlfolder/funcs.txt"
+
+# Messages go to the log instead of PortMaster's full-screen dialog, which
+# would compete with the game for the framebuffer (as on spruce).
+pm_message() {
+  echo "$1"
+}
+
+pm_platform_helper() {
+  [ -e "$PM_PIPE" ] && PortMasterDialogExit
+  printf ""
+}
+
+export GPTOKEYB2="$ESUDO env LD_PRELOAD=$controlfolder/libinterpose.${DEVICE_ARCH}.so $controlfolder/gptokeyb2 $ESUDOKILL2"
+export GPTOKEYB="$ESUDO $controlfolder/gptokeyb $ESUDOKILL"

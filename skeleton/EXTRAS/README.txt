@@ -23,3 +23,14 @@ This extras zip file is included with every release, regardless of whether its c
 Bios files
 
 You'll need to bring your own BIOS files for the emulator paks included in this zip file. Please refer to https://nextui.loveretro.games/usage/#required-bios for the correct file names and locations.
+
+----------------------------------------
+Ports (PortMaster), Anbernic RG XX handhelds only
+
+Copy Emus/h700/PORTS.pak and the "Roms/Ports (PORTS)" folder to your card. "Ports" then appears in the main menu.
+
+Open Ports and choose PortMaster at the top of the list. The first time, it downloads PortMaster, so connect to Wi-Fi in Settings first. In PortMaster, pick games to install; they appear in the Ports list, with box art, when you leave PortMaster.
+
+Some games need files from a copy you own. Put them in that game's folder inside the Ports folder at the root of your card; PortMaster tells you which files. To install games without Wi-Fi, copy their zip files to Ports/autoinstall and open PortMaster.
+
+In a game, press Select and Start together to quit. PortMaster is a separate project and doesn't officially support NextUI yet, so a few games may not work.

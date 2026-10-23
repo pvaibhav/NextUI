@@ -83,10 +83,47 @@ typedef struct SettingsV2 {
 	int displaycal_blue_gain;
 } SettingsV2;
 
+// V3 renames displaycal_enabled to displaycal_mode (OFF/ON/CUSTOM) in place.
+// Layout is identical to V2, and OFF=0/ON=1 match the old flag values.
+typedef struct SettingsV3 {
+	int version; // future proofing
+	int brightness;
+	int colortemperature;
+	int headphones;
+	int speaker;
+	int mute;
+	int contrast;
+	int saturation;
+	int exposure;
+	int toggled_brightness;
+	int toggled_colortemperature;
+	int toggled_contrast;
+	int toggled_saturation;
+	int toggled_exposure;
+	int toggled_volume;
+	int turbo_a;
+	int turbo_b;
+	int turbo_x;
+	int turbo_y;
+	int turbo_l1;
+	int turbo_l2;
+	int turbo_r1;
+	int turbo_r2;
+	int unused[2]; // for future use
+	// NOTE: doesn't really need to be persisted but still needs to be shared
+	int jack;
+	int audiosink; // was bluetooth true/false before
+	int fanSpeed; // 0-100, -1 for auto
+	int displaycal_mode;
+	int displaycal_red_gain;
+	int displaycal_green_gain;
+	int displaycal_blue_gain;
+} SettingsV3;
+
 // When incrementing SETTINGS_VERSION, update the Settings typedef and add
 // backwards compatibility to InitSettings!
-#define SETTINGS_VERSION 2
-typedef SettingsV2 Settings;
+#define SETTINGS_VERSION 3
+typedef SettingsV3 Settings;
 static Settings DefaultSettings = {
 	.version = SETTINGS_VERSION,
 	.brightness = SETTINGS_DEFAULT_BRIGHTNESS,
@@ -114,7 +151,7 @@ static Settings DefaultSettings = {
 	.jack = 0,
 	.audiosink = AUDIO_SINK_DEFAULT,
 	.fanSpeed = SETTINGS_DEFAULT_FAN_SPEED,
-	.displaycal_enabled = DISPLAYCAL_DEFAULT_ENABLED,
+	.displaycal_mode = DISPLAYCAL_DEFAULT_MODE,
 	.displaycal_red_gain = DISPLAYCAL_DEFAULT_RED_GAIN,
 	.displaycal_green_gain = DISPLAYCAL_DEFAULT_GREEN_GAIN,
 	.displaycal_blue_gain = DISPLAYCAL_DEFAULT_BLUE_GAIN,
@@ -211,13 +248,22 @@ void InitSettings(void) {
 			if (fd>=0) {
 				if (version == SETTINGS_VERSION) {
 					read(fd, settings, shm_size);
+					settings->displaycal_mode = DisplayCal_clampModeValue(settings->displaycal_mode);
 				}
 				else {
 					// initialize with defaults
 					memcpy(settings, &DefaultSettings, shm_size);
 
 					// overwrite with migrated data
-					if(version == 1) {
+					if(version == 2) {
+						SettingsV2 old;
+						read(fd, &old, sizeof(SettingsV2));
+
+						memcpy(settings, &old, sizeof(SettingsV2));
+						settings->version = SETTINGS_VERSION;
+						settings->displaycal_mode = DisplayCal_clampModeValue(settings->displaycal_mode);
+					}
+					else if(version == 1) {
 						SettingsV1 old;
 						read(fd, &old, sizeof(SettingsV1));
 
@@ -260,7 +306,7 @@ void InitSettings(void) {
 	}
 
 	// This will implicitly update all other settings based on FN switch state
-	settings->displaycal_enabled = 0;
+	settings->displaycal_mode = DISPLAYCAL_MODE_OFF;
 	SetMute(settings->mute);
 
 	SetFanSpeed(settings->fanSpeed);
@@ -329,9 +375,9 @@ int GetExposure(void)
 
 	return settings->exposure;
 }
-int GetDisplayCalEnabled(void)
+int GetDisplayCalMode(void)
 {
-	return settings->displaycal_enabled;
+	return settings->displaycal_mode;
 }
 int GetDisplayCalRedGain(void)
 {
@@ -471,9 +517,9 @@ void SetExposure(int value){
 	settings->exposure = value;
 	SaveSettings();
 }
-void SetDisplayCalEnabled(int is_enabled) {
-	(void)is_enabled;
-	settings->displaycal_enabled = 0;
+void SetDisplayCalMode(int mode) {
+	(void)mode;
+	settings->displaycal_mode = DISPLAYCAL_MODE_OFF;
 	SaveSettings();
 }
 void SetDisplayCalRedGain(int value) {
@@ -1075,8 +1121,8 @@ void SetRawExposure(int val){
 	}
 }
 
-void SetRawDisplayCal(int enabled, int red_gain, int green_gain, int blue_gain) {
-	(void)enabled;
+void SetRawDisplayCal(int mode, int red_gain, int green_gain, int blue_gain) {
+	(void)mode;
 	(void)red_gain;
 	(void)green_gain;
 	(void)blue_gain;

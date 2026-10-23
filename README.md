@@ -4,6 +4,22 @@
 
 </div>
 
+# NextUI: pvaibhav's experimental fork
+
+Anbernic H700 support has officially merged into NextUI and is included in [v6.15.0](https://github.com/LoveRetro/NextUI/releases/tag/v6.15.0).
+For stable builds on supported Anbernic and TrimUI devices, use the [official NextUI repository](https://github.com/LoveRetro/NextUI) and its [latest stable release](https://github.com/LoveRetro/NextUI/releases/latest).
+
+This repository is now my personal fork for experimental features and improvements before they are merged upstream.
+Releases from `pvaibhav-improvements` will combine upstream `main` with those changes.
+
+## Experimental features
+
+Planned for the first experimental release:
+
+- **LUT-based display calibration.** Per-device 1D lookup tables correct display colours towards sRGB.
+  Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
+  The **Colour correction** setting offers **Off**, **On**, and **Custom** modes, with manual red, green, and blue gains in Custom mode.
+
 <hr>
 
 <h4 align="center">
@@ -16,7 +32,7 @@
 
 <div align="center"><p>
     <a href="https://github.com/LoveRetro/NextUI/releases/latest">
-      <img alt="Latest release" src="https://img.shields.io/github/v/release/LoveRetro/NextUI?style=for-the-badge&logo=starship&include_prerelease=false&color=C9CBFF&logoColor=D9E0EE&labelColor=302D41&sort=semver" />
+      <img alt="Official stable release" src="https://img.shields.io/github/v/release/LoveRetro/NextUI?style=for-the-badge&logo=starship&include_prerelease=false&color=C9CBFF&logoColor=D9E0EE&labelColor=302D41&sort=semver" />
     </a>
     <a href="https://github.com/LoveRetro/NextUI/pulse">
       <img alt="Last commit" src="https://img.shields.io/github/last-commit/LoveRetro/NextUI?style=for-the-badge&logo=starship&color=8bd5ca&logoColor=D9E0EE&labelColor=302D41"/>
@@ -34,7 +50,7 @@
 
 ---
 
-A CFW based of MinUI with a rebuild emulation engine and tons of added features for the TrimUI Brick and Smart Pro. 
+NextUI is custom firmware based on MinUI, with a rebuilt emulation engine and added features for supported TrimUI and Anbernic H700 devices.
 
 For other devices we recommend checking out [MinUI](https://github.com/shauninman/MinUI)
 
@@ -48,7 +64,7 @@ See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full details.
 > has changed to PolyForm Noncommercial 1.0.0. The full transition history and rationale
 > is documented in [issue #765](https://github.com/LoveRetro/NextUI/issues/765).
 
-## Changes and additions
+## Features inherited from NextUI
 
 - Fixed both screen tearing and sync stutter problems of MinUI by rebuilding the emulator engine core
 - Game switcher menu (Onion OS style) by [@frysee](https://github.com/frysee)

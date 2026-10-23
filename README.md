@@ -10,7 +10,7 @@ Anbernic H700 support has officially merged into NextUI and is included in [v6.1
 For stable builds on supported Anbernic and TrimUI devices, use the [official NextUI repository](https://github.com/LoveRetro/NextUI) and its [latest stable release](https://github.com/LoveRetro/NextUI/releases/latest).
 
 This repository is now my personal fork for experimental features and improvements before they are merged upstream.
-Releases from `pvaibhav-improvements` will combine upstream `main` with those changes.
+Releases from `pvaibhav` will combine upstream `main` with those changes.
 
 ## Experimental features
 

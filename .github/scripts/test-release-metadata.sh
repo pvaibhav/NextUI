@@ -12,7 +12,7 @@ for tag in v6.15.0-pvaibhav.1 v6.15.0-pvaibhav.12 v123-pvaibhav.1; do
   fi
 done
 
-for tag in '' main pvaibhav-improvements v6.15.0 v6.15.0-pvaibhav. \
+for tag in '' main pvaibhav v6.15.0 v6.15.0-pvaibhav. \
   v6.15.0-pvaibhav.x v6.15.0-pvaibhav.1-extra v6.15.0-other.1 \
   v6..15-pvaibhav.1 v6.15.0-pvaibhav.1/extra $'v6.15.0-pvaibhav.1\ntag=other'; do
   if actual="$(bash "$script" "$tag" 2>/dev/null)"; then

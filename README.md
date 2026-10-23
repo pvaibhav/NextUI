@@ -20,6 +20,20 @@ Planned for the first experimental release:
   Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
   The **Colour correction** setting offers **Off**, **On**, and **Custom** modes, with manual red, green, and blue gains in Custom mode.
 
+## Build and release this fork
+
+Tag the commit you want to release and push the tag to this repository:
+
+```sh
+git tag -a v6.15.0-pvaibhav.1 -m "NextUI v6.15.0-pvaibhav.1"
+git push origin v6.15.0-pvaibhav.1
+```
+
+Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.
+The release workflow builds the tagged commit, including all emulator cores, for `tg5040`, `tg5050`, and `h700`.
+It publishes a GitHub prerelease with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
+Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
+
 <hr>
 
 <h4 align="center">

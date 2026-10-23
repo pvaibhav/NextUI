@@ -14,7 +14,7 @@ Releases from `pvaibhav` will combine upstream `main` with those changes.
 
 ## Experimental features
 
-Planned for the first experimental release:
+Included in this fork:
 
 - **LUT-based display calibration.** Per-device 1D lookup tables correct display colours towards sRGB.
   Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
@@ -30,9 +30,13 @@ git push origin v6.15.0-pvaibhav.1
 ```
 
 Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.
+Write the changelog in [RELEASE_NOTES.md](RELEASE_NOTES.md), with `# <tag>` on the first line.
 The release workflow builds the tagged commit, including all emulator cores, for `tg5040`, `tg5050`, and `h700`.
 It publishes a GitHub release marked **Latest**, with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
 Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
+
+To compile a candidate before tagging it, run **Release NextUI fork** manually in GitHub Actions and enter the planned version tag.
+Manual runs upload build artifacts without creating a tag or publishing a release.
 
 <hr>
 

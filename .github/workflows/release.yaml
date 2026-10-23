@@ -6,17 +6,25 @@ on:
   push:
     tags:
       - 'v*-pvaibhav.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag to build without publishing
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.version || github.ref_name }}
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
       release-name: ${{ steps.metadata.outputs.release-name }}
@@ -29,9 +37,15 @@ jobs:
       - name: Check release tag validation
         run: bash .github/scripts/test-release-metadata.sh
 
+      - name: Check display calibration profiles and parser
+        run: python3 .github/scripts/test-displaycal.py
+
       - name: Prepare tagged release
         id: metadata
-        run: bash .github/scripts/release-metadata.sh "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/release-metadata.sh "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check release notes version
+        run: test "$(head -n 1 RELEASE_NOTES.md)" = "# $RELEASE_TAG"
 
   core-matrix:
     needs: prepare
@@ -175,6 +189,7 @@ jobs:
             releases/${{ env.RELEASE_NAME }}-extras.zip
 
   release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - prepare
@@ -194,6 +209,9 @@ jobs:
           pattern: ${{ needs.prepare.outputs.release-name }}-*
           merge-multiple: true
 
+      - name: Prepare release description
+        run: tail -n +3 RELEASE_NOTES.md > release-notes.md
+
       - name: Release
         uses: softprops/action-gh-release@v3
         with:
@@ -202,19 +220,7 @@ jobs:
             releases/${{ needs.prepare.outputs.release-name }}-base.zip
             releases/${{ needs.prepare.outputs.release-name }}-extras.zip
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: release-notes.md
           tag_name: ${{ needs.prepare.outputs.tag }}
           prerelease: false
           make_latest: "true"
-          body: |
-            This is an experimental release of pvaibhav's NextUI fork.
-
-            For the fork's experimental features, see the README for this tag:
-            https://github.com/${{ github.repository }}/blob/${{ needs.prepare.outputs.tag }}/README.md
-
-            For official stable releases for Anbernic and TrimUI devices, use:
-            https://github.com/LoveRetro/NextUI/releases/latest
-
-            ## How to install/update
-            For a fresh installation, follow the instructions here: https://nextui.loveretro.games/getting-started/installation/
-            When updating from a previous release: https://nextui.loveretro.games/getting-started/updating/

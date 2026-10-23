@@ -19,6 +19,8 @@ Included in this fork:
 - **LUT-based display calibration.** Per-device 1D lookup tables correct display colours towards sRGB.
   Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
   The **Colour correction** setting offers **Off**, **On**, and **Custom** modes, with manual red, green, and blue gains in Custom mode.
+- **Fork updater.** The bundled updater offers this repository's `v<version>-pvaibhav.<revision>` releases.
+  Updater self-updates come from [my updater fork](https://github.com/pvaibhav/nextui-updater-pak).
 
 ## Build and release this fork
 
@@ -32,6 +34,7 @@ git push origin v6.15.0-pvaibhav.1
 Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.
 Write the changelog in [RELEASE_NOTES.md](RELEASE_NOTES.md), with `# <tag>` on the first line.
 The release workflow builds the tagged commit, including all emulator cores, for `tg5040`, `tg5050`, and `h700`.
+It also builds the updater from the source commit pinned in the workflow and bundles that package.
 It publishes a GitHub release marked **Latest**, with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
 Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
 

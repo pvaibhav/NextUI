@@ -93,10 +93,48 @@ jobs:
           path: workspace/${{ env.PLATFORM }}/cores/output/
           if-no-files-found: error
 
+  build-updater:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout fork updater
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: pvaibhav/nextui-updater-pak
+          ref: 73e16c924dbd0d9bcb597a1b76288c90e411985b
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Test firmware release selection
+        run: cargo test --locked
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git --locked
+
+      - name: Build updater
+        run: cross build --locked --release --target=aarch64-unknown-linux-gnu
+
+      - name: Package updater
+        run: bash scripts/create_pak.sh
+
+      - name: Upload updater
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nextui.updater.pakz
+          path: nextui.updater.pakz
+          if-no-files-found: error
+
   build:
     needs:
       - prepare
       - build-core
+      - build-updater
     runs-on: ubuntu-24.04-arm
     permissions:
       attestations: write
@@ -105,6 +143,7 @@ jobs:
     env:
       RELEASE_NAME: ${{ needs.prepare.outputs.release-name }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.tag }}
+      UPDATER_PAK_URL: file://${{ github.workspace }}/updater/nextui.updater.pakz
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -156,6 +195,15 @@ jobs:
       - name: Special
         run: make special
 
+      - name: Download fork updater
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: nextui.updater.pakz
+          path: updater/
+
+      - name: Verify fork updater package
+        run: python3 .github/scripts/verify-updater.py updater/nextui.updater.pakz
+
       - name: Package
         run: make package
 
@@ -189,7 +237,7 @@ jobs:
             releases/${{ env.RELEASE_NAME }}-extras.zip
 
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - prepare

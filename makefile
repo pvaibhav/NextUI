@@ -36,9 +36,10 @@ RELEASE_NAME ?= $(RELEASE_BASE)-$(RELEASE_DOT)
 
 # Extra paks to ship
 VENDOR_DEST := ./build/VENDOR/Tools
+UPDATER_PAK_URL ?= https://github.com/pvaibhav/nextui-updater-pak/releases/latest/download/nextui.updater.pakz
 PACKAGE_URL_MAPPINGS := \
 	"https://github.com/UncleJunVIP/nextui-pak-store/releases/latest/download/Pak.Store.pakz nextui.pak_store.pakz" \
-	"https://github.com/LoveRetro/nextui-updater-pak/releases/latest/download/nextui.updater.pakz nextui.updater.pakz"
+	"$(UPDATER_PAK_URL) nextui.updater.pakz"
 	# add more URLs as needed
 
 ###########################################################
@@ -263,7 +264,8 @@ package: tidy
 		url=$$(echo $$entry | awk '{print $$1}'); \
 		target=$$(echo $$entry | awk '{print $$2}'); \
 		echo "Downloading $$url → $(VENDOR_DEST)/$$target"; \
-		curl -Ls -o "$(VENDOR_DEST)/$$target" "$$url"; \
+		curl -fLsS --retry 3 -o "$(VENDOR_DEST)/$$target" "$$url" || exit 1; \
+		unzip -tq "$(VENDOR_DEST)/$$target" >/dev/null || exit 1; \
 	done
 
 	# Move renamed .pakz files into base folder

@@ -19,7 +19,8 @@ Included in this fork:
 - **LUT-based display calibration.** Per-device 1D lookup tables correct display colours towards sRGB.
   Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
   The **Colour correction** setting offers **Off**, **On**, and **Custom** modes, with manual red, green, and blue gains in Custom mode.
-- **Fork updater.** The bundled updater offers this repository's `v<version>-pvaibhav.<revision>` releases.
+- **Fork updater.** Launch **Updater (pvaibhav)** for this repository's `v<version>-pvaibhav.<revision>` releases.
+  Its separate tool folder protects it from Pak Store updates to the official updater.
   Updater self-updates come from [my updater fork](https://github.com/pvaibhav/nextui-updater-pak).
 
 ## Build and release this fork
@@ -40,6 +41,8 @@ Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
 
 To compile a candidate before tagging it, run **Release NextUI fork** manually in GitHub Actions and enter the planned version tag.
 Manual runs upload build artifacts without creating a tag or publishing a release.
+For packaging changes, `core_run_id` can reuse cores from a successful run after checking that their build inputs are unchanged.
+Tagged releases always rebuild all cores.
 
 <hr>
 

@@ -12,8 +12,11 @@ def verify(path):
     with zipfile.ZipFile(path) as package:
         assert package.testzip() is None, "Updater ZIP checksum failed"
         for platform in ("tg5040", "tg5050", "my355", "h700"):
-            prefix = f"Tools/{platform}/Updater.pak/"
+            prefix = f"Tools/{platform}/Updater (pvaibhav).pak/"
             metadata = json.loads(package.read(prefix + "pak.json"))
+            assert metadata["name"] == "Updater (pvaibhav)"
+            assert not any(name.startswith(f"Tools/{platform}/Updater.pak/")
+                           for name in package.namelist()), "Conflicts with official Pak Store updater"
             assert metadata["repo_url"] == "https://github.com/pvaibhav/nextui-updater-pak"
             assert metadata["release_filename"] == "nextui.updater.pakz"
             versions.add(metadata["version"])

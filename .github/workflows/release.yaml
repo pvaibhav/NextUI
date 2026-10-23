@@ -12,17 +12,24 @@ on:
         description: Version tag to build without publishing
         required: true
         type: string
+      core_run_id:
+        description: Optional successful run to reuse unchanged cores for this build-only candidate
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name }}-${{ inputs.version || github.ref_name }}
+  group: release-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     env:
       RELEASE_TAG: ${{ inputs.version || github.ref_name }}
     outputs:
@@ -47,6 +54,13 @@ jobs:
       - name: Check release notes version
         run: test "$(head -n 1 RELEASE_NOTES.md)" = "# $RELEASE_TAG"
 
+      - name: Validate candidate core reuse
+        if: inputs.core_run_id != ''
+        run: bash .github/scripts/validate-core-reuse.sh
+        env:
+          CORE_RUN_ID: ${{ inputs.core_run_id }}
+          GH_TOKEN: ${{ github.token }}
+
   core-matrix:
     needs: prepare
     runs-on: ubuntu-24.04-arm
@@ -69,6 +83,7 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build-core:
+    if: github.event_name != 'workflow_dispatch' || inputs.core_run_id == ''
     needs: core-matrix
     runs-on: ubuntu-24.04-arm
     env:
@@ -101,12 +116,15 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           repository: pvaibhav/nextui-updater-pak
-          ref: 73e16c924dbd0d9bcb597a1b76288c90e411985b
+          ref: 88e1fc4fdcb8595e4e66b1863f0123c80fc5dceb
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
+
+      - name: Test package isolation and launcher
+        run: python3 scripts/test_package.py
 
       - name: Install test dependencies
         run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
@@ -131,12 +149,14 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: ${{ !cancelled() && !failure() }}
     needs:
       - prepare
       - build-core
       - build-updater
     runs-on: ubuntu-24.04-arm
     permissions:
+      actions: read
       attestations: write
       contents: read
       id-token: write
@@ -162,6 +182,8 @@ jobs:
           path: workspace/tg5040/cores/output/
           pattern: core-tg5040-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (tg5040)
         run: make tg5040
@@ -174,6 +196,8 @@ jobs:
           path: workspace/tg5050/cores/output/
           pattern: core-tg5050-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (tg5050)
         run: make tg5050
@@ -186,6 +210,8 @@ jobs:
           path: workspace/h700/cores/output/
           pattern: core-h700-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (h700)
         run: make h700

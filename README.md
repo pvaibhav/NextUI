@@ -31,7 +31,7 @@ git push origin v6.15.0-pvaibhav.1
 
 Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.
 The release workflow builds the tagged commit, including all emulator cores, for `tg5040`, `tg5050`, and `h700`.
-It publishes a GitHub prerelease with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
+It publishes a GitHub release marked **Latest**, with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
 Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
 
 <hr>

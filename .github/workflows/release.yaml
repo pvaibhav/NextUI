@@ -204,8 +204,8 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
           tag_name: ${{ needs.prepare.outputs.tag }}
-          prerelease: true
-          make_latest: "false"
+          prerelease: false
+          make_latest: "true"
           body: |
             This is an experimental release of pvaibhav's NextUI fork.
 

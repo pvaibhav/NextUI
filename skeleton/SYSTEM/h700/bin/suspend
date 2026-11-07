@@ -11,6 +11,15 @@ exec 0<&-
 
 wifid_running=
 bluetoothd_running=
+wifi_module_unloaded=
+
+# Wake sources armed besides the power key. Disarming them for the duration of
+# sleep lets the H700 standby go deeper; the power key stays armed. Charger
+# insertion and RTC alarms do not wake the device while it sleeps.
+quiet_wake_sources="/sys/devices/platform/soc/rtc/power/wakeup
+/sys/class/power_supply/axp2202-battery/power/wakeup
+/sys/class/power_supply/axp2202-usb/power/wakeup"
+quieted_wake_sources=
 
 sleep_retval=
 
@@ -42,6 +51,20 @@ before() {
 		>&2 echo "Stopping wpa_supplicant..."
 		"$SYSTEM_PATH/etc/wifi/wifi_init.sh" stop || true
 	fi
+
+	# sdc1 keeps the RTL8821CS powered through suspend (keep-power-in-suspend),
+	# so its supply rail stays on the whole sleep. Unloading the driver turns the
+	# rail off. Bluetooth shares the chip, so leave it alone when BT is in use.
+	if [ -z "$bluetoothd_running" ] && grep -q '^8821cs ' /proc/modules; then
+		>&2 echo "Unloading 8821cs..."
+		ip link set wlan0 down 2>/dev/null || true
+		rmmod 8821cs && wifi_module_unloaded=1
+	fi
+
+	for wake in $quiet_wake_sources; do
+		[ "$(cat "$wake" 2>/dev/null)" = enabled ] || continue
+		echo disabled > "$wake" && quieted_wake_sources="$quieted_wake_sources $wake"
+	done
 }
 
 # Resume work that must finish BEFORE this script exits: the caller
@@ -50,6 +73,9 @@ before() {
 # for ~10s (buttons appear dead after wake).
 after_sync() {
 	>&2 echo "Resumed from suspend."
+	for wake in $quieted_wake_sources; do
+		echo enabled > "$wake" 2>/dev/null || true
+	done
 	echo 1 > /sys/class/power_supply/axp2202-battery/work_led 2>/dev/null || true
 	echo 1 > /sys/class/power_supply/axp2202-battery/mcu_pwr 2>/dev/null || true
 
@@ -67,6 +93,11 @@ after_sync() {
 # Slow resume work (radios take ~5s) that must NOT delay the script's
 # exit, or it freezes the caller's input handling for that long.
 after_async() {
+	if [ -n "$wifi_module_unloaded" ]; then
+		>&2 echo "Reloading 8821cs..."
+		insmod /lib/modules/8821cs.ko 2>/dev/null || modprobe 8821cs 2>/dev/null || true
+	fi
+
 	if [ -n "$wifid_running" ]; then
 		>&2 echo "Starting wpa_supplicant..."
 		"$SYSTEM_PATH/etc/wifi/wifi_init.sh" start || true

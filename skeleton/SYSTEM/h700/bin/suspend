@@ -94,8 +94,24 @@ after_sync() {
 # exit, or it freezes the caller's input handling for that long.
 after_async() {
 	if [ -n "$wifi_module_unloaded" ]; then
+		# The radio lost power during sleep, so the SDIO card kept across
+		# resume is stale: the first probe fails with -123, then the driver's
+		# own power-up finds the fresh card and creates wlan0. BaseOS docs/05
+		# reports that this race can leave no wlan0 on some units, so load
+		# once more if it does not appear.
 		>&2 echo "Reloading 8821cs..."
 		insmod /lib/modules/8821cs.ko 2>/dev/null || modprobe 8821cs 2>/dev/null || true
+		n=0
+		while [ ! -d /sys/class/net/wlan0 ] && [ "$n" -lt 30 ]; do
+			sleep 0.1
+			n=$((n + 1))
+		done
+		if [ ! -d /sys/class/net/wlan0 ]; then
+			>&2 echo "No wlan0 after reload; retrying..."
+			rmmod 8821cs 2>/dev/null || true
+			sleep 1
+			insmod /lib/modules/8821cs.ko 2>/dev/null || modprobe 8821cs 2>/dev/null || true
+		fi
 	fi
 
 	if [ -n "$wifid_running" ]; then

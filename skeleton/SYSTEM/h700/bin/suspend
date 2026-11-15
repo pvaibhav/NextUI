@@ -81,7 +81,44 @@ after_async() {
 	( "$SYSTEM_PATH/bin/run_hooks.sh" post-resume.d ) >/dev/null 2>&1
 }
 
+# NextUI exports NEXTUI_POWEROFF_SECS when the power off timeout is on. We arm
+# the RTC alarm for that long. If the alarm ends the suspend, we exit with 3
+# and NextUI powers off. Deadlines use the RTC's clock, the one the alarm runs
+# on, so the system clock doesn't matter.
+rtc=/sys/class/rtc/rtc0
+poweroff_at=
+poweroff_due=
+
+arm_poweroff_alarm() {
+	[ "${NEXTUI_POWEROFF_SECS:-0}" -gt 0 ] 2>/dev/null || return 0
+	rtc_now=$(cat "$rtc/since_epoch" 2>/dev/null)
+	if [ -n "$rtc_now" ]; then
+		echo enabled > "$rtc/device/power/wakeup" 2>/dev/null
+		# The kernel rejects a new alarm while one is pending.
+		echo 0 > "$rtc/wakealarm" 2>/dev/null
+		rtc_alarm=$((rtc_now + NEXTUI_POWEROFF_SECS))
+		# Some RTC drivers accept the write without setting an alarm.
+		echo "$rtc_alarm" > "$rtc/wakealarm" 2>/dev/null &&
+			[ -n "$(cat "$rtc/wakealarm" 2>/dev/null)" ] &&
+			poweroff_at=$rtc_alarm
+	fi
+	if [ -z "$poweroff_at" ]; then
+		>&2 echo "Could not set the RTC alarm, the device will not power off by itself."
+		return 0
+	fi
+	>&2 echo "Power off alarm set for ${NEXTUI_POWEROFF_SECS}s from now."
+}
+
+# Sets poweroff_due once the RTC is within $1 seconds of the alarm time.
+check_poweroff_due() {
+	[ -n "$poweroff_at" ] || return 1
+	rtc_now=$(cat "$rtc/since_epoch" 2>/dev/null)
+	[ -n "$rtc_now" ] && [ "$((rtc_now + $1))" -ge "$poweroff_at" ] && poweroff_due=1
+	[ -n "$poweroff_due" ]
+}
+
 before
+arm_poweroff_alarm
 
 hallkey=/sys/class/power_supply/axp2202-battery/hallkey
 os_sleep=/sys/class/power_supply/axp2202-battery/os_sleep
@@ -91,6 +128,11 @@ while :; do
 	sleep_max_tries=5
 	for i in $(seq 1 $sleep_max_tries); do
 		>&2 echo "Deep sleep attempt $i of $sleep_max_tries"
+
+		# The alarm may be due after slow hooks or retries. If it fired between
+		# this check and the suspend, nothing would wake the device, so the last
+		# 2 seconds count as due.
+		check_poweroff_due 2 && break
 
 		sleep_time=$(date +%s)
 
@@ -104,6 +146,9 @@ while :; do
 		# Now issue suspend-to-ram command.
 		echo mem >/sys/power/state
 		sleep_retval=$?
+
+		# Decide why we woke before anything else takes time.
+		check_poweroff_due 0 && break
 
 		>&2 echo "Deep sleep: kernel returned $sleep_retval"
 		if [ $sleep_retval -eq 0 ]; then
@@ -136,7 +181,9 @@ while :; do
 	# screen on) once the lid is actually open; otherwise re-suspend.
 	# Non-clamshell hallkey reads 1, and a suspend failure must still
 	# exit so the caller can escalate to poweroff.
-	if [ $sleep_retval -eq 0 ] && [ -r "$hallkey" ] && [ "$(cat "$hallkey")" = "0" ]; then
+	# An alarm wake must reach the caller so it can power off, even with
+	# the lid closed.
+	if [ $sleep_retval -eq 0 ] && [ -z "$poweroff_due" ] && [ -r "$hallkey" ] && [ "$(cat "$hallkey")" = "0" ]; then
 		>&2 echo "Woke with lid closed; re-suspending"
 		sleep 1
 		continue
@@ -145,6 +192,14 @@ while :; do
 done
 
 after_sync
+if [ -n "$poweroff_due" ]; then
+	# NextUI is about to power off, so skip the radios and the resume hooks.
+	>&2 echo "Power off timeout expired, skipping resume tasks."
+	exit 3
+fi
+
+[ -n "$poweroff_at" ] && echo 0 > "$rtc/wakealarm" 2>/dev/null
+
 after_async &
 
 exit $sleep_retval

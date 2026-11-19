@@ -94,13 +94,11 @@ arm_poweroff_alarm() {
 	rtc_now=$(cat "$rtc/since_epoch" 2>/dev/null)
 	if [ -n "$rtc_now" ]; then
 		echo enabled > "$rtc/device/power/wakeup" 2>/dev/null
-		# The kernel rejects a new alarm while one is pending.
+		# The kernel rejects a new alarm while one is enabled.
 		echo 0 > "$rtc/wakealarm" 2>/dev/null
-		rtc_alarm=$((rtc_now + NEXTUI_POWEROFF_SECS))
-		# Some RTC drivers accept the write without setting an alarm.
-		echo "$rtc_alarm" > "$rtc/wakealarm" 2>/dev/null &&
-			[ -n "$(cat "$rtc/wakealarm" 2>/dev/null)" ] &&
-			poweroff_at=$rtc_alarm
+		echo "$((rtc_now + NEXTUI_POWEROFF_SECS))" > "$rtc/wakealarm" 2>/dev/null
+		# Empty if the write failed. The driver may also round the time.
+		poweroff_at=$(cat "$rtc/wakealarm" 2>/dev/null)
 	fi
 	if [ -z "$poweroff_at" ]; then
 		>&2 echo "Could not set the RTC alarm, the device will not power off by itself."
@@ -129,9 +127,8 @@ while :; do
 	for i in $(seq 1 $sleep_max_tries); do
 		>&2 echo "Deep sleep attempt $i of $sleep_max_tries"
 
-		# The alarm may be due after slow hooks or retries. If it fired between
-		# this check and the suspend, nothing would wake the device, so the last
-		# 2 seconds count as due.
+		# If the alarm fired before the suspend started, nothing would wake the
+		# device, so the last 2 seconds count as due.
 		check_poweroff_due 2 && break
 
 		sleep_time=$(date +%s)
@@ -147,7 +144,7 @@ while :; do
 		echo mem >/sys/power/state
 		sleep_retval=$?
 
-		# Decide why we woke before anything else takes time.
+		# Read the RTC before anything else takes time.
 		check_poweroff_due 0 && break
 
 		>&2 echo "Deep sleep: kernel returned $sleep_retval"
@@ -183,7 +180,7 @@ while :; do
 	# exit so the caller can escalate to poweroff.
 	# An alarm wake must reach the caller so it can power off, even with
 	# the lid closed.
-	if [ $sleep_retval -eq 0 ] && [ -z "$poweroff_due" ] && [ -r "$hallkey" ] && [ "$(cat "$hallkey")" = "0" ]; then
+	if [ -z "$poweroff_due" ] && [ $sleep_retval -eq 0 ] && [ -r "$hallkey" ] && [ "$(cat "$hallkey")" = "0" ]; then
 		>&2 echo "Woke with lid closed; re-suspending"
 		sleep 1
 		continue
@@ -191,15 +188,15 @@ while :; do
 	break
 done
 
-after_sync
+[ -n "$poweroff_at" ] && echo 0 > "$rtc/wakealarm" 2>/dev/null
+
 if [ -n "$poweroff_due" ]; then
-	# NextUI is about to power off, so skip the radios and the resume hooks.
+	# NextUI is about to power off, so skip the resume tasks.
 	>&2 echo "Power off timeout expired, skipping resume tasks."
 	exit 3
 fi
 
-[ -n "$poweroff_at" ] && echo 0 > "$rtc/wakealarm" 2>/dev/null
-
+after_sync
 after_async &
 
 exit $sleep_retval

@@ -304,7 +304,8 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
             }
             if (sscanf(line, "powerOffTimeout=%i", &temp_value) == 1)
             {
-                CFG_setPowerOffTimeoutSecs(temp_value);
+                if (temp_value >= 0)
+                    CFG_setPowerOffTimeoutSecs(temp_value);
                 continue;
             }
             if (sscanf(line, "powerOffProtection=%i", &temp_value) == 1)

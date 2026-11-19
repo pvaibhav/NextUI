@@ -588,7 +588,7 @@ void PLAT_getGPUStats(void) {
 	perf.gpu_speed = 0;
 	perf.gpu_usage = -1;
 
-	FILE* dump = fopen("/sys/kernel/debug/sunxi_gpu/dump", "r");
+	FILE *dump = fopen("/sys/kernel/debug/sunxi_gpu/dump", "r");
 	if (dump) {
 		char line[128];
 		while (fgets(line, sizeof(line), dump)) {

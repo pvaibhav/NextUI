@@ -130,33 +130,33 @@ void PLAT_getGPUTemp() {
 void PLAT_getGPUStats(void) {
 	perf.gpu_speed = getInt("/sys/devices/platform/soc@3000000/1800000.gpu/devfreq/1800000.gpu/cur_freq")/1000000;
 	// cat /sys/devices/platform/soc@3000000/1800000.gpu/sunxi_gpu/sunxi_gpu_freq | grep -o '[0-9]*%' | tr -d '%'
-	
-    char buffer[256];
-    buffer[0] = '\0';
-    getFile("/sys/devices/platform/soc@3000000/1800000.gpu/sunxi_gpu/sunxi_gpu_freq", buffer, sizeof(buffer));
-    
-    // Parse the percentage value from the buffer
-    // Look for a number followed by '%'
-    char *ptr = buffer;
-    while (*ptr) {
-        if (*ptr >= '0' && *ptr <= '9') {
-            // Found start of a number
-            char *start = ptr;
-            while (*ptr >= '0' && *ptr <= '9') {
-                ptr++;
-            }
-            // Check if followed by '%'
-            if (*ptr == '%') {
-                *ptr = '\0'; // Temporarily null-terminate
-                perf.gpu_usage = (double)atoi(start);
-                return;
-            }
-        } else {
-            ptr++;
-        }
-    }
-    
-    perf.gpu_usage = -1;
+
+	char buffer[256];
+	buffer[0] = '\0';
+	getFile("/sys/devices/platform/soc@3000000/1800000.gpu/sunxi_gpu/sunxi_gpu_freq", buffer, sizeof(buffer));
+
+	// Parse the percentage value from the buffer
+	// Look for a number followed by '%'
+	char *ptr = buffer;
+	while (*ptr) {
+		if (*ptr >= '0' && *ptr <= '9') {
+			// Found start of a number
+			char *start = ptr;
+			while (*ptr >= '0' && *ptr <= '9') {
+				ptr++;
+			}
+			// Check if followed by '%'
+			if (*ptr == '%') {
+				*ptr = '\0'; // Temporarily null-terminate
+				perf.gpu_usage = (double)atoi(start);
+				return;
+			}
+		} else {
+			ptr++;
+		}
+	}
+
+	perf.gpu_usage = -1;
 }
 
 static struct WIFI_connection connection = {

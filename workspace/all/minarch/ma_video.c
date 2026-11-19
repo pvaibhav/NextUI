@@ -699,8 +699,8 @@ static void drawDebugHud(const void* data, unsigned width, unsigned height, size
 	if (!show_debug) return;
 
 	uint32_t now = SDL_GetTicks();
-	if (!isnan(perf.ratio) && !isnan(perf.fps) && !isnan(perf.req_fps)  && !isnan(perf.buffer_ms) &&
-		perf.buffer_size >= 0  && perf.buffer_free >= 0 && now > 5000) {
+	if (!isnan(perf.ratio) && !isnan(perf.fps) && !isnan(perf.req_fps) && !isnan(perf.buffer_ms) &&
+		perf.buffer_size >= 0 && perf.buffer_free >= 0 && now > 5000) {
 		int x = 2 + renderer.src_x;
 		int y = 2 + renderer.src_y;
 		char debug_text[250];

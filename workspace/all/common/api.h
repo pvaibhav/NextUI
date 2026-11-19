@@ -572,6 +572,9 @@ void PWR_powerOff(int reboot);
 int PWR_isPoweringOff(void);
 
 void PWR_sleep(void);
+// Returns 0 after a normal resume, -1 if the suspend failed, and
+// PWR_DEEPSLEEP_POWEROFF if the power off timeout expired during the suspend.
+#define PWR_DEEPSLEEP_POWEROFF 1
 int PWR_deepSleep(void);
 
 void PWR_requestSleep(void);

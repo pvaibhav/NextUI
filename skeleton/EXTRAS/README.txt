@@ -23,3 +23,11 @@ This extras zip file is included with every release, regardless of whether its c
 Bios files
 
 You'll need to bring your own BIOS files for the emulator paks included in this zip file. Please refer to https://nextui.loveretro.games/usage/#required-bios for the correct file names and locations.
+
+----------------------------------------
+MS-DOS
+
+Place each game's .zip or .dosz archive in /Roms/MS-DOS (DOS). Open the
+archive in NextUI and choose the game's executable in the DOSBox Pure menu.
+Hold Menu and press L2 to reopen the DOSBox Pure menu during play. Use L1
+and R1 to switch to the on-screen keyboard.

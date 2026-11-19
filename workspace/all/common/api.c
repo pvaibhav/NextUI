@@ -4446,10 +4446,8 @@ static void PWR_waitForWake(void)
 				}
 				if (pwr.can_poweroff)
 				{
-					// PWR_update() ran before_sleep (the quicksave in minarch)
-					// and PWR_sleep() stopped game time tracking before the
-					// screen went off. PWR_enterSleep() stopped the monitors,
-					// which handle PWR_powerOff()'s SIGTERM only after SIGCONT.
+					// PWR_enterSleep() stopped the monitors. They handle
+					// PWR_powerOff()'s SIGTERM only after SIGCONT.
 					system("killall -CONT keymon.elf");
 					system("killall -CONT batmon.elf");
 					system("killall -CONT audiomon.elf");
@@ -4505,6 +4503,7 @@ int PWR_deepSleep(void)
 		setenv(PWR_POWEROFF_SECS_ENV, secs, 1);
 
 		int ret = system(suspend_path);
+		unsetenv(PWR_POWEROFF_SECS_ENV);
 		if (ret < 0)
 		{
 			LOG_error("failed to launch suspend executable: %d\n", errno);

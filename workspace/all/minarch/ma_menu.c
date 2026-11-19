@@ -224,8 +224,11 @@ void Menu_quit(void) {
 void Menu_beforeSleep() {
 	SRAM_write();
 	RTC_write();
-	State_autosave();
-	putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
+	// Without a new state, the next boot would resume a stale one.
+	if (State_autosave())
+		putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
+	else
+		unlink(AUTO_RESUME_PATH);
 }
 void Menu_afterSleep() {
 	unlink(AUTO_RESUME_PATH);

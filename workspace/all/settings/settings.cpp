@@ -656,7 +656,7 @@ int main(int argc, char *argv[])
             { return CFG_getSuspendTimeoutSecs(); }, [](const std::any &value)
             { CFG_setSuspendTimeoutSecs(std::any_cast<uint32_t>(value)); },
             []() { CFG_setSuspendTimeoutSecs(CFG_DEFAULT_SUSPENDTIMEOUTSECS);}},
-            new MenuItem{ListItemType::Generic, "Power off timeout", "Time the device sleeps before it powers off.\nNextUI quicksaves a running game and resumes it on next boot.", poweroff_timeout_secs, poweroff_timeout_labels, []() -> std::any
+            new MenuItem{ListItemType::Generic, "Power off timeout", "Time the device sleeps before it powers off.\nA quicksaved game resumes on next boot.", poweroff_timeout_secs, poweroff_timeout_labels, []() -> std::any
             { return CFG_getPowerOffTimeoutSecs(); }, [](const std::any &value)
             { CFG_setPowerOffTimeoutSecs(std::any_cast<uint32_t>(value)); },
             []() { CFG_setPowerOffTimeoutSecs(CFG_DEFAULT_POWEROFFTIMEOUTSECS);}},

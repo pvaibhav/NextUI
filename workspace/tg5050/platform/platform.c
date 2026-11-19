@@ -127,11 +127,8 @@ void PLAT_getGPUTemp() {
 	perf.gpu_temp = getInt("/sys/devices/virtual/thermal/thermal_zone5/temp")/1000;
 }
 
-void PLAT_getGPUSpeed() {
+void PLAT_getGPUStats(void) {
 	perf.gpu_speed = getInt("/sys/devices/platform/soc@3000000/1800000.gpu/devfreq/1800000.gpu/cur_freq")/1000000;
-}
-
-void PLAT_getGPUUsage() {
 	// cat /sys/devices/platform/soc@3000000/1800000.gpu/sunxi_gpu/sunxi_gpu_freq | grep -o '[0-9]*%' | tr -d '%'
 	
     char buffer[256];
@@ -159,8 +156,7 @@ void PLAT_getGPUUsage() {
         }
     }
     
-    // If no percentage found, set to 0.0
-    perf.gpu_usage = 0.0;
+    perf.gpu_usage = -1;
 }
 
 static struct WIFI_connection connection = {

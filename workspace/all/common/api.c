@@ -169,11 +169,13 @@ static inline uint32_t UintMult(uint32_t color, uint32_t modulate_rgba)
 }
 
 ///////////////////////////////
+#define SND_QUALITY_CUBIC -1
 static int qualityLevels[] = {
-	3,
-	4,
-	2,
-	1};
+	SRC_ZERO_ORDER_HOLD,
+	SRC_LINEAR,
+	SND_QUALITY_CUBIC,
+	SRC_SINC_FASTEST,
+	SRC_SINC_MEDIUM_QUALITY};
 static struct PWR_Context
 {
 	int initialized;
@@ -2744,8 +2746,90 @@ static void SND_resizeBuffer(void)
 	SDL_UnlockAudio();
 #endif
 }
-static int soundQuality = 2;
+static int soundQuality = SND_QUALITY_CUBIC;
 static int resetSrcState = 0;
+
+// Catmull-Rom resampler. pos is 32.32 fixed point so that splitting the
+// input into chunks yields exactly the same output as one long call.
+static struct
+{
+	SND_Frame history[3];
+	uint64_t pos;
+	int rate_in;
+	int rate_out;
+} cubic;
+
+static void cubic_reset(void)
+{
+	memset(&cubic, 0, sizeof(cubic));
+	cubic.pos = 1ULL << 32;
+}
+
+static inline int16_t cubic_sample(int16_t y0, int16_t y1, int16_t y2, int16_t y3, float mu)
+{
+	float a = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+	float b = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+	float c = -0.5f * y0 + 0.5f * y2;
+	float out = ((a * mu + b) * mu + c) * mu + y1;
+	if (out > 32767.0f)
+		return 32767;
+	if (out < -32768.0f)
+		return -32768;
+	return (int16_t)lrintf(out);
+}
+
+static ResampledFrames resample_cubic(const SND_Frame *input_frames, int input_frame_count,
+									  int input_sample_rate, int output_sample_rate, double final_ratio)
+{
+	if (cubic.rate_in != input_sample_rate || cubic.rate_out != output_sample_rate)
+	{
+		cubic_reset();
+		cubic.rate_in = input_sample_rate;
+		cubic.rate_out = output_sample_rate;
+	}
+
+	// Index i < 3 is carried history, index i >= 3 is input_frames[i - 3].
+	uint64_t step = (uint64_t)((double)(1ULL << 32) / final_ratio + 0.5);
+	uint64_t end = (uint64_t)(input_frame_count + 1) << 32;
+	int output_frame_count = cubic.pos < end ? (int)((end - cubic.pos + step - 1) / step) : 0;
+
+	SND_Frame *output_frames = (SND_Frame *)malloc((output_frame_count ? output_frame_count : 1) * sizeof(SND_Frame));
+	if (!output_frames)
+	{
+		fprintf(stderr, "Error allocating output frames\n");
+		exit(1);
+	}
+
+	for (int i = 0; i < output_frame_count; i++)
+	{
+		int idx = (int)(cubic.pos >> 32);
+		float mu = (float)(uint32_t)cubic.pos * (1.0f / 4294967296.0f);
+		const SND_Frame *f[4];
+		for (int k = 0; k < 4; k++)
+		{
+			int j = idx - 1 + k;
+			f[k] = j < 3 ? &cubic.history[j] : &input_frames[j - 3];
+		}
+		output_frames[i].left = cubic_sample(f[0]->left, f[1]->left, f[2]->left, f[3]->left, mu);
+		output_frames[i].right = cubic_sample(f[0]->right, f[1]->right, f[2]->right, f[3]->right, mu);
+		cubic.pos += step;
+	}
+
+	cubic.pos -= (uint64_t)input_frame_count << 32;
+	SND_Frame history[3];
+	for (int k = 0; k < 3; k++)
+	{
+		int j = input_frame_count + k;
+		history[k] = j < 3 ? cubic.history[j] : input_frames[j - 3];
+	}
+	memcpy(cubic.history, history, sizeof(history));
+
+	ResampledFrames resampled;
+	resampled.frames = output_frames;
+	resampled.frame_count = output_frame_count;
+	return resampled;
+}
+
 void SND_setQuality(int quality)
 {
 	LOG_info("Set sound quality\n");
@@ -2763,9 +2847,20 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 
 	double final_ratio = ((double)output_sample_rate / input_sample_rate) * ratio;
 
-	if (!src_state || resetSrcState)
+	if (resetSrcState)
 	{
 		resetSrcState = 0;
+		if (src_state)
+			src_delete(src_state);
+		src_state = NULL;
+		cubic_reset();
+	}
+
+	if (soundQuality == SND_QUALITY_CUBIC)
+		return resample_cubic(input_frames, input_frame_count, input_sample_rate, output_sample_rate, final_ratio);
+
+	if (!src_state)
+	{
 		src_state = src_new(soundQuality, 2, &error);
 		if (src_state == NULL)
 		{

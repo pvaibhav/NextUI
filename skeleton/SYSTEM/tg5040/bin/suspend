@@ -58,16 +58,58 @@ after() {
 	# alsactl --file "$asound_state_dir/asound.state.pre" restore || true
 }
 
+# NextUI exports NEXTUI_POWEROFF_SECS when the power off timeout is on. We arm
+# the RTC alarm for that long. If the alarm ends the suspend, we exit with 3
+# and NextUI powers off. Deadlines use the RTC's clock, the one the alarm runs
+# on, so the system clock doesn't matter.
+rtc=/sys/class/rtc/rtc0
+poweroff_at=
+poweroff_due=
+
+arm_poweroff_alarm() {
+	[ "${NEXTUI_POWEROFF_SECS:-0}" -gt 0 ] 2>/dev/null || return 0
+	rtc_now=$(cat "$rtc/since_epoch" 2>/dev/null)
+	if [ -n "$rtc_now" ]; then
+		echo enabled > "$rtc/device/power/wakeup" 2>/dev/null
+		# The kernel rejects a new alarm while one is enabled.
+		echo 0 > "$rtc/wakealarm" 2>/dev/null
+		echo "$((rtc_now + NEXTUI_POWEROFF_SECS))" > "$rtc/wakealarm" 2>/dev/null
+		# Empty if the write failed. The driver may also round the time.
+		poweroff_at=$(cat "$rtc/wakealarm" 2>/dev/null)
+	fi
+	if [ -z "$poweroff_at" ]; then
+		>&2 echo "Could not set the RTC alarm, the device will not power off by itself."
+		return 0
+	fi
+	>&2 echo "Power off alarm set for ${NEXTUI_POWEROFF_SECS}s from now."
+}
+
+# Sets poweroff_due once the RTC is within $1 seconds of the alarm time.
+check_poweroff_due() {
+	[ -n "$poweroff_at" ] || return 1
+	rtc_now=$(cat "$rtc/since_epoch" 2>/dev/null)
+	[ -n "$rtc_now" ] && [ "$((rtc_now + $1))" -ge "$poweroff_at" ] && poweroff_due=1
+	[ -n "$poweroff_due" ]
+}
+
 before
+arm_poweroff_alarm
 
 >&2 echo "Suspending..."
 sleep_max_tries=5
 for i in $(seq 1 $sleep_max_tries); do
 	>&2 echo "Deep sleep attempt $i of $sleep_max_tries"
 
+	# If the alarm fired before the suspend started, nothing would wake the
+	# device, so the last 2 seconds count as due.
+	check_poweroff_due 2 && break
+
 	sleep_time=$(date +%s)
 	echo mem >/sys/power/state
 	sleep_retval=$?
+
+	# Read the RTC before anything else takes time.
+	check_poweroff_due 0 && break
 
 	>&2 echo "Deep sleep: kernel returned $sleep_retval"
 	if [ $sleep_retval -eq 0 ]; then
@@ -94,6 +136,14 @@ for i in $(seq 1 $sleep_max_tries); do
 	>&2 echo "Deep sleep failed: retrying in 3 seconds"
 	sleep 3
 done
+
+[ -n "$poweroff_at" ] && echo 0 > "$rtc/wakealarm" 2>/dev/null
+
+if [ -n "$poweroff_due" ]; then
+	# NextUI is about to power off, so skip the radios and the resume hooks.
+	>&2 echo "Power off timeout expired, skipping resume tasks."
+	exit 3
+fi
 
 # Resume services in background to reduce UI latency
 after &

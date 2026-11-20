@@ -740,7 +740,7 @@ static void drawDebugHud(const void* data, unsigned width, unsigned height, size
 static int fadein_frame = 0;
 #define FADEIN_FRAMES 8
 
-static void video_refresh_callback_main(const void *data, unsigned width, unsigned height, size_t pitch) {
+static void video_refresh_callback_main(const void *data, unsigned width, unsigned height, size_t pitch, size_t pitch_565) {
 	// return;
 
 	Special_render();
@@ -765,6 +765,8 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	// if source has changed size (or forced by dst_p==0)
 	// eg. true src + cropped src + fixed dst + cropped dst
 	if (renderer.dst_p==0 || width!=renderer.true_w || height!=renderer.true_h) {
+		// Clearing the old layout also presents through SDL before this frame is published.
+		renderer.src = NULL;
 		selectScaler(width, height, pitch);
 		GFX_clearAll();
 		if (!shader_reset_suppressed) {
@@ -785,6 +787,7 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	}
 
 	renderer.src = (void*)data;
+	renderer.src_565_p = pitch_565;
 	renderer.dst = screen->pixels;
 	GFX_blitRenderer(&renderer);
 
@@ -960,6 +963,7 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 	if (pixels != rgbaDataSize) {
 		Uint32 *buffer = realloc(rgbaData, pixels * (sizeof(Uint32) + sizeof(uint16_t)));
 		if (!buffer) return;
+		renderer.src = NULL;
 		rgbaData = buffer;
 		rgbaDataSize = pixels;
 	}
@@ -988,7 +992,6 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 		retained_565 = 0;
 		renderer.src_dirty = 1;
 	}
-	renderer.src_565_p = retained_565 ? packed_pitch : 0;
 	data = retained_565 ? (const void *)packed : (const void *)rgbaData;
 	pitch = width * sizeof(Uint32);
 
@@ -999,10 +1002,11 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 
 
 	// Render the frame
-	video_refresh_callback_main(data, width, height, pitch);
+	video_refresh_callback_main(data, width, height, pitch, retained_565 ? packed_pitch : 0);
 }
 
 void Video_cleanup(void) {
+	renderer.src = NULL;
 	if (rgbaData) {
 		free(rgbaData);
 		rgbaData = NULL;

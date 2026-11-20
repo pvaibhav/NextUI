@@ -1766,7 +1766,17 @@ void PLAT_flip(SDL_Surface* IGNORED, int ignored) {
         return;
     }
 
-    SDL_UpdateTexture(vid.stream_layer1, NULL, vid.blit->src, vid.blit->src_p);
+    if (vid.blit->src_565_p) {
+        void *pixels;
+        int pitch;
+        if (SDL_LockTexture(vid.stream_layer1, NULL, &pixels, &pitch) < 0) return;
+        int result = SDL_ConvertPixels(vid.width, vid.height, SDL_PIXELFORMAT_RGB565,
+                vid.blit->src, vid.blit->src_565_p, SDL_PIXELFORMAT_ARGB8888, pixels, pitch);
+        SDL_UnlockTexture(vid.stream_layer1);
+        if (result < 0) return;
+    } else {
+        SDL_UpdateTexture(vid.stream_layer1, NULL, vid.blit->src, vid.blit->src_p);
+    }
 
     SDL_Texture* target = vid.stream_layer1;
     int x = vid.blit->src_x;

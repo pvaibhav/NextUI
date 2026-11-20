@@ -65,6 +65,7 @@ typedef struct ShaderProgram {
 	GLint u_Texture;
 	GLint u_OrigTexture;
 	GLint u_texelSize;
+	int window_dependent; // reads gl_FragCoord or dFdy, which differ between an FBO and a flipped draw on the screen
 	
 	ShaderParam *pragmas;  // Dynamic array of parsed pragma parameters
 	int num_pragmas;       // Count of valid pragma parameters
@@ -497,6 +498,7 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 
 	const char *shaderSource  = load_shader_source(filepath);
 	loadShaderPragmas(shader,shaderSource);
+	shader->window_dependent = strstr(shaderSource, "gl_FragCoord") || strstr(shaderSource, "dFdy");
 
 	GLuint vertex_shader1 = load_shader_from_file(GL_VERTEX_SHADER, filepath);
 	GLuint fragment_shader1 = load_shader_from_file(GL_FRAGMENT_SHADER, filepath);
@@ -1814,6 +1816,9 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 
 	const GLuint shader_program_handle = shader_program->shader_p;
 
+	// a user pass drawn straight to the screen instead of through the final pass
+	const int direct = !target_texture && shader_pass >= shaders && shader_pass < shaders + MAXSHADERS;
+
 	while ((pre_err = glGetError()) != GL_NO_ERROR) {
 		(void)pre_err;
 	}
@@ -1861,13 +1866,21 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 			-1.0f,  1.0f, 0.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f,  // top-left
 			-1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f,  // bottom-left
 			1.0f,  1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f, 0.0f,  // top-right
-			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f   // bottom-right
+			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f,  // bottom-right
+			// The same quad upside down. User shaders leave the image the way FBOs store it and rely on
+			// default.glsl to flip it for the screen, so a direct pass has to be drawn flipped.
+			-1.0f,  1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f,
+			-1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f,
+			1.0f,  1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f,
+			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f, 0.0f
 		};
 
 		glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 	}
 
-	if (shader_program_handle != last_program) {
+	// With one user pass and no overlay, a direct pass is the only program that ever runs, and its
+	// uniforms still change: the frame counter, and parameters edited in the menu.
+	if (shader_program_handle != last_program || direct) {
 		GLint posAttrib = glGetAttribLocation(shader_program_handle, "VertexCoord");
 		if (posAttrib >= 0) {
 			glVertexAttribPointer(posAttrib, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
@@ -1922,6 +1935,7 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, dst_width, dst_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 			shader_pass->target_updated = 0;
+			last_bound_texture = *target_texture;
 		}
 		if (fbo == 0) {
 			glGenFramebuffers(1, &fbo);
@@ -1975,7 +1989,7 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 		last_texelSize[0] = texelSize[0];
 		last_texelSize[1] = texelSize[1];
 	}
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDrawArrays(GL_TRIANGLE_STRIP, direct ? 4 : 0, 4);
 	last_program = shader_program_handle;
 }
 
@@ -2282,12 +2296,27 @@ void PLAT_GL_Swap() {
         first_pass = valid_passes;
         for (int i = 0; i < nrofshaders; i++) {
             // a pass that reads the frame counter draws something new every frame
-            if (shaders[i].target_updated || shaders[i].program->u_FrameCount >= 0) first_pass = 0;
+            if ((i < first_pass && shaders[i].target_updated) || shaders[i].program->u_FrameCount >= 0) first_pass = 0;
         }
     }
     memcpy(pass_dims, dims, sizeof(dims));
     // runShaderPass skips the bind when its input is the texture it bound last, but the upload code above bound another one
     if (first_pass > 0) glBindTexture(GL_TEXTURE_2D, shaders[first_pass - 1].target_texture);
+
+    // A last pass that already has the size of the picture on screen can draw there itself, which saves
+    // the final 1:1 copy. That leaves no output to reuse on a duplicate frame, so it is only done while
+    // none has come for 120 frames. The copy has to be provably exact for the picture to stay the same:
+    // nearest filter, and a framebuffer with the 8 bits per channel of the FBO it replaces.
+    static int frames_since_duplicate = 0;
+    static GLint green_bits = 0;
+    if (!green_bits) {
+        green_bits = 8; // kept where the query no longer exists (desktop core profile)
+        glGetIntegerv(GL_GREEN_BITS, &green_bits);
+    }
+    if (!new_pixels) frames_since_duplicate = 0;
+    else if (frames_since_duplicate < 120) frames_since_duplicate++;
+    const int direct = nrofshaders > 0 && shaders[nrofshaders - 1].scale == 9 && frames_since_duplicate >= 120
+        && s_pass_finalscale.filter == GL_NEAREST && green_bits == 8 && !shaders[nrofshaders - 1].program->window_dependent;
 
     for (int i = 0; i < nrofshaders; i++) {
         int src_w = last_w;
@@ -2329,19 +2358,24 @@ void PLAT_GL_Swap() {
         }
         shaderinfocount++;
 
+        const int to_screen = direct && i == nrofshaders - 1;
         if (i >= first_pass) runShaderPass(
 			&shaders[i],
 			(i == 0) ? orig_texture : shaders[i - 1].target_texture,
-			&shaders[i].target_texture,
+			to_screen ? NULL : &shaders[i].target_texture,
 			(i == nrofshaders - 1) ? s_pass_finalscale.filter : shaders[i+1].filter,
-			0, 0, dst_w, dst_h);
+			to_screen ? dst_rect.x : 0, to_screen ? dst_rect.y : 0, dst_w, dst_h);
 
         last_w = dst_w;
         last_h = dst_h;
     }
-    valid_passes = nrofshaders;
+    valid_passes = nrofshaders - direct;
 
-    if (nrofshaders > 0) {
+    if (direct) {
+        // the last pass's FBO texture missed this frame and any reload: rebuild it when it is next used
+        shaders[nrofshaders - 1].target_updated = 1;
+    }
+    else if (nrofshaders > 0) {
 		//LOG_info("Shader Pass: Scale to screen (pipeline size: %d)\n", nrofshaders);
 		s_pass_finalscale.srcw = s_pass_finalscale.texw = last_w;
 		s_pass_finalscale.srch = s_pass_finalscale.texh = last_h;

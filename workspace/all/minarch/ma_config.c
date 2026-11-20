@@ -917,6 +917,7 @@ static char* resample_labels[] = {
 	"Low",
 	"Medium",
 	"High",
+	"Very High",
 	"Max",
 	NULL
 };
@@ -1351,7 +1352,7 @@ struct Config config = {
 				.desc	= "Resampling quality higher takes more CPU",
 				.default_value = 2,
 				.value = 2,
-				.count = 4,
+				.count = 5,
 				.values = resample_labels,
 				.labels = resample_labels,
 			},

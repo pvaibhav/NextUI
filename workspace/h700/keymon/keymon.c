@@ -111,6 +111,10 @@ int main(int argc, char *argv[]) {
 	sigaddset(&blocked, SIGINT);
 	sigaddset(&blocked, SIGCONT);
 	sigprocmask(SIG_BLOCK, &blocked, &waitmask);
+	sigset_t continued;
+	sigemptyset(&continued);
+	sigaddset(&continued, SIGCONT);
+	const struct timespec no_wait = {0};
 
 	char path[32];
 	struct pollfd fds[INPUT_COUNT];
@@ -183,6 +187,13 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
+		// A stop can land between ppoll and these reads. Consume a pending resume
+		// after draining the descriptors, before applying any of their events.
+		while (sigtimedwait(&continued, NULL, &no_wait) == SIGCONT) {
+			ignore = 1;
+			for (int i = 0; i < INPUT_COUNT; i++)
+				while (read(inputs[i], &ev, sizeof(ev)) == sizeof(ev)) {}
+		}
 		if (ignore) {
 			menu_pressed = 0;
 			select_pressed = 0;
@@ -192,13 +203,13 @@ int main(int argc, char *argv[]) {
 			down_repeat_at = 0;
 		}
 
-		if (up_just_pressed || (up_pressed && now >= up_repeat_at)) {
+		if (up_just_pressed || (up_pressed && ms_until(up_repeat_at, now) == 0)) {
 			adjust_up(menu_pressed, select_pressed);
 			if (up_just_pressed) up_just_pressed = 0;
 			else up_repeat_at += 100;
 		}
 
-		if (down_just_pressed || (down_pressed && now >= down_repeat_at)) {
+		if (down_just_pressed || (down_pressed && ms_until(down_repeat_at, now) == 0)) {
 			adjust_down(menu_pressed, select_pressed);
 			if (down_just_pressed) down_just_pressed = 0;
 			else down_repeat_at += 100;

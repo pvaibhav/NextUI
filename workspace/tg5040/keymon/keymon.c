@@ -135,6 +135,10 @@ int main (int argc, char *argv[]) {
 	sigaddset(&blocked, SIGTERM);
 	sigaddset(&blocked, SIGCONT);
 	sigprocmask(SIG_BLOCK, &blocked, &waitmask);
+	sigset_t continued;
+	sigemptyset(&continued);
+	sigaddset(&continued, SIGCONT);
+	const struct timespec no_wait = {0};
 
 	pthread_create(&mute_pt, NULL, &watchMute, NULL);
 
@@ -182,6 +186,7 @@ int main (int argc, char *argv[]) {
 		ignore = resumed; // ignore input that arrived during sleep
 		resumed = 0;
 		got_input = 0;
+		int jack = -1;
 		
 		for (int i=0; i<INPUT_COUNT; i++) {
 			input = inputs[i];
@@ -193,7 +198,7 @@ int main (int argc, char *argv[]) {
 					//printf("switch: %i\n", ev.code);
 					if (ev.code==CODE_JACK) {
 						//printf("jack: %i\n", val);
-						SetJack(val);
+						jack = val;
 					}
 				}
 				if (( ev.type != EV_KEY ) || ( val > REPEAT )) continue;
@@ -219,6 +224,14 @@ int main (int argc, char *argv[]) {
 			}
 		}
 		
+		// A stop can land between ppoll and these reads. Consume a pending resume
+		// after draining the descriptors, before applying any of their events.
+		while (sigtimedwait(&continued, NULL, &no_wait) == SIGCONT) {
+			ignore = 1;
+			for (int i = 0; i < INPUT_COUNT; i++)
+				while (read(inputs[i], &ev, sizeof(ev)) == sizeof(ev)) {}
+		}
+		if (!ignore && jack >= 0) SetJack(jack);
 		if (ignore) {
 			menu_pressed = 0;
 			menu2_pressed = 0;
@@ -228,7 +241,7 @@ int main (int argc, char *argv[]) {
 			down_repeat_at = 0;
 		}
 		
-		if (up_just_pressed || (up_pressed && now>=up_repeat_at)) {
+		if (up_just_pressed || (up_pressed && ms_until(up_repeat_at, now) == 0)) {
 			if (menu_pressed) {
 				val = GetBrightness();
 				if (val<BRIGHTNESS_MAX) SetBrightness(++val);
@@ -248,7 +261,7 @@ int main (int argc, char *argv[]) {
 			else up_repeat_at += 100;
 		}
 		
-		if (down_just_pressed || (down_pressed && now>=down_repeat_at)) {
+		if (down_just_pressed || (down_pressed && ms_until(down_repeat_at, now) == 0)) {
 			if (menu_pressed) {
 				val = GetBrightness();
 				if (val>BRIGHTNESS_MIN) SetBrightness(--val);

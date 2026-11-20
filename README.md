@@ -12,6 +12,14 @@ For stable builds on supported Anbernic and TrimUI devices, use the [official Ne
 This repository is now my personal fork for experimental features and improvements before they are merged upstream.
 Releases from `pvaibhav` will combine upstream `main` with those changes.
 
+## Latest fork release
+
+[Download the latest fork release](https://github.com/pvaibhav/NextUI/releases/latest).
+On an existing fork install, open **Updater (pvaibhav)** and choose **Quick Update** for the firmware or **Full Update** to include Extras.
+
+Version `v6.15.0-pvaibhav.4` reduces CPU and GPU work during gameplay.
+See the [release notes](RELEASE_NOTES.md) for the changes to video, audio, and power use.
+
 ## Experimental features
 
 Included in this fork:
@@ -22,14 +30,20 @@ Included in this fork:
 - **Fork updater.** Launch **Updater (pvaibhav)** for this repository's `v<version>-pvaibhav.<revision>` releases.
   Its separate tool folder protects it from Pak Store updates to the official updater.
   Updater self-updates come from [my updater fork](https://github.com/pvaibhav/nextui-updater-pak).
+- **Power off timeout.** In Settings, set how long the device stays suspended before it shuts down.
+  If NextUI saved the game before shutdown, the game resumes on the next boot.
+- **DOSBox Pure.** Install Extras and put DOS games in `Roms/MS-DOS (DOS)`.
+  Press **MENU + L2** in a game to open the DOSBox menu.
 
 ## Build and release this fork
 
-Tag the commit you want to release and push the tag to this repository:
+Tag the commit you want to release and push the tag to this repository.
+Replace the example version with the version you are publishing.
 
 ```sh
-git tag -a v6.15.0-pvaibhav.1 -m "NextUI v6.15.0-pvaibhav.1"
-git push origin v6.15.0-pvaibhav.1
+tag=v6.15.0-pvaibhav.4
+git tag -a "$tag" -m "NextUI $tag"
+git push origin "refs/tags/$tag"
 ```
 
 Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.

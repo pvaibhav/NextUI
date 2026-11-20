@@ -36,6 +36,7 @@ static int reloadShaderTextures = 1;
 static int shaderResetRequested = 0;
 // leading user shader passes whose FBO output still matches the source texture
 static int valid_passes = 0;
+static int direct_framebuffer;
 
 static SDL_BlendMode getPremultipliedBlendMode(void) {
 	return SDL_ComposeCustomBlendMode(
@@ -65,7 +66,7 @@ typedef struct ShaderProgram {
 	GLint u_Texture;
 	GLint u_OrigTexture;
 	GLint u_texelSize;
-	int window_dependent; // reads gl_FragCoord or dFdy, which differ between an FBO and a flipped draw on the screen
+	uint32_t source_hash;
 	
 	ShaderParam *pragmas;  // Dynamic array of parsed pragma parameters
 	int num_pragmas;       // Count of valid pragma parameters
@@ -153,7 +154,8 @@ static uint32_t SDL_transparentBlack = 0;
 
 #define OVERLAYS_FOLDER SDCARD_PATH "/Overlays"
 
-static char* overlay_path = NULL;
+static char* pending_overlay_path;
+static void stopFramePrep(void);
 
 // Notification overlay state for RA achievements
 typedef struct {
@@ -496,9 +498,14 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 	char filepath[512];
 	snprintf(filepath, sizeof(filepath), "%s/%s", path, filename);
 
-	const char *shaderSource  = load_shader_source(filepath);
-	loadShaderPragmas(shader,shaderSource);
-	shader->window_dependent = strstr(shaderSource, "gl_FragCoord") || strstr(shaderSource, "dFdy");
+	char *source = load_shader_source(filepath);
+	if (!source) return;
+	loadShaderPragmas(shader, source);
+	uint32_t hash = 2166136261u;
+	for (const unsigned char *c = (const unsigned char *)source; *c; c++)
+		hash = (hash ^ *c) * 16777619u;
+	free(source);
+	shader->source_hash = hash;
 
 	GLuint vertex_shader1 = load_shader_from_file(GL_VERTEX_SHADER, filepath);
 	GLuint fragment_shader1 = load_shader_from_file(GL_FRAGMENT_SHADER, filepath);
@@ -508,7 +515,9 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 		LOG_info("Deleting previous shader %i\n",shader->shader_p);
 		glDeleteProgram(shader->shader_p);
 	}
-	shader->shader_p = link_program(vertex_shader1, fragment_shader1, filename);
+	char cache_key[320];
+	snprintf(cache_key, sizeof(cache_key), "%s.%08x", filename, hash);
+	shader->shader_p = link_program(vertex_shader1, fragment_shader1, cache_key);
 
 
 	if (shader->shader_p == 0) {
@@ -554,6 +563,21 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 
 void PLAT_initShaders() {
 	SDL_GL_MakeCurrent(vid.window, vid.gl_context);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	GLint red = 0, green = 0, blue = 0, alpha = 0, samples = -1, encoding = 0, component = 0;
+	GLenum attachment = GL_BACK;
+#ifdef GL_BACK_LEFT
+	if (!strcmp(PLAT_getModel(), "Desktop")) attachment = GL_BACK_LEFT;
+#endif
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &red);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &green);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &blue);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alpha);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &encoding);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &component);
+	glGetIntegerv(GL_SAMPLES, &samples);
+	direct_framebuffer = red == 8 && green == 8 && blue == 8 && (alpha == 0 || alpha == 8)
+		&& samples == 0 && encoding == GL_LINEAR && component == GL_UNSIGNED_NORMALIZED;
 	glViewport(0, 0, device_width, device_height);
 
 	// Init user shaders
@@ -785,6 +809,7 @@ static void clearVideo(void) {
 }
 
 void PLAT_quitVideo(void) {
+	stopFramePrep();
 	clearVideo();
 
 	// Make sure the GL context is current before tearing down textures/renderer
@@ -818,7 +843,6 @@ void PLAT_quitVideo(void) {
 
 	// Cleanup and shutdown
 	SDL_DestroyWindow(vid.window);
-	if (overlay_path) free(overlay_path);
 
 	SDL_QuitSubSystem(SDL_INIT_VIDEO);
 	system("cat /dev/zero > /dev/fb0 2>/dev/null");
@@ -949,6 +973,7 @@ static int effectUpdated = 0;
 static pthread_mutex_t video_prep_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t video_prep_cond = PTHREAD_COND_INITIALIZER;
 static int video_prep_requested = 0;
+static int video_prep_stop;
 
 static void wakeFramePrep(void) {
 	pthread_mutex_lock(&video_prep_mutex);
@@ -1059,35 +1084,20 @@ void PLAT_setOverlay(const char* filename, const char* tag) {
         SDL_DestroyTexture(vid.overlay);
         vid.overlay = NULL;
     }
-	if (overlay_path) {
-		free(overlay_path);
-		overlay_path = NULL;
+	char *path = NULL;
+	if (filename && *filename && strcmp(filename, "None")) {
+		size_t len = strlen(OVERLAYS_FOLDER) + strlen(tag) + strlen(filename) + 3;
+		path = malloc(len);
+		if (!path) return;
+		snprintf(path, len, "%s/%s/%s", OVERLAYS_FOLDER, tag, filename);
 	}
-
 	pthread_mutex_lock(&video_prep_mutex);
-	overlayUpdated=1;
+	free(pending_overlay_path);
+	pending_overlay_path = path;
+	overlayUpdated = 1;
+	video_prep_requested = 1;
+	pthread_cond_signal(&video_prep_cond);
 	pthread_mutex_unlock(&video_prep_mutex);
-
-    if (!filename || strcmp(filename, "") == 0 || strcmp(filename, "None") == 0) {
-		overlay_path = strdup("");
-        LOG_info("Skipping overlay update.\n");
-		wakeFramePrep();
-        return;
-    }
-
-    size_t path_len = strlen(OVERLAYS_FOLDER) + strlen(tag) + strlen(filename) + 4; // +3 for slashes and null-terminator
-    overlay_path = malloc(path_len);
-
-    if (!overlay_path) {
-        perror("malloc failed");
-		wakeFramePrep();
-        return;
-    }
-
-    snprintf(overlay_path, path_len, "%s/%s/%s", OVERLAYS_FOLDER, tag, filename);
-    LOG_info("Overlay path set to: %s\n", overlay_path);
-	wakeFramePrep();
-
 }
 
 
@@ -1817,7 +1827,7 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 	const GLuint shader_program_handle = shader_program->shader_p;
 
 	// a user pass drawn straight to the screen instead of through the final pass
-	const int direct = !target_texture && shader_pass >= shaders && shader_pass < shaders + MAXSHADERS;
+	const int direct = !target_texture && nrofshaders > 0 && shader_pass == &shaders[nrofshaders - 1];
 
 	while ((pre_err = glGetError()) != GL_NO_ERROR) {
 		(void)pre_err;
@@ -2048,39 +2058,35 @@ int prepareFrameThread(void *data) {
 			pthread_mutex_unlock(&video_prep_mutex);
 		}
 
-		// Check overlayUpdated flag with mutex
 		pthread_mutex_lock(&video_prep_mutex);
-		int overlay_updated = overlayUpdated;
+		int update_overlay = overlayUpdated;
+		char *path = pending_overlay_path;
+		pending_overlay_path = NULL;
+		overlayUpdated = 0;
 		pthread_mutex_unlock(&video_prep_mutex);
-
-        if (overlay_updated) {
-
-			LOG_info("overlay updated\n");
-			if(overlay_path) {
-				SDL_Surface* tmp = IMG_Load(overlay_path);
-				SDL_Surface* converted = NULL;
-				if (tmp) {
-					converted = SDL_ConvertSurfaceFormat(tmp, SDL_PIXELFORMAT_RGBA32, 0);
-					SDL_FreeSurface(tmp);
-				}
-
-				pthread_mutex_lock(&video_prep_mutex);
+		if (update_overlay) {
+			SDL_Surface *image = path ? IMG_Load(path) : NULL;
+			SDL_Surface *converted = image ? SDL_ConvertSurfaceFormat(image, SDL_PIXELFORMAT_RGBA32, 0) : NULL;
+			SDL_FreeSurface(image);
+			free(path);
+			pthread_mutex_lock(&video_prep_mutex);
+			if (overlayUpdated) {
+				SDL_FreeSurface(converted);
+			} else {
+				SDL_FreeSurface(frame_prep.loaded_overlay);
 				frame_prep.loaded_overlay = converted;
 				frame_prep.overlay_ready = 1;
-				overlayUpdated=0;
-				pthread_mutex_unlock(&video_prep_mutex);
-			} else {
-				pthread_mutex_lock(&video_prep_mutex);
-				frame_prep.loaded_overlay = 0;
-				frame_prep.overlay_ready = 1;
-				overlayUpdated=0;
-				pthread_mutex_unlock(&video_prep_mutex);
 			}
-        }
+			pthread_mutex_unlock(&video_prep_mutex);
+		}
 
 		pthread_mutex_lock(&video_prep_mutex);
-		while (!video_prep_requested)
+		while (!video_prep_requested && !video_prep_stop)
 			pthread_cond_wait(&video_prep_cond, &video_prep_mutex);
+		if (video_prep_stop) {
+			pthread_mutex_unlock(&video_prep_mutex);
+			break;
+		}
 		video_prep_requested = 0;
 		pthread_mutex_unlock(&video_prep_mutex);
     }
@@ -2088,6 +2094,21 @@ int prepareFrameThread(void *data) {
 }
 
 static SDL_Thread *prepare_thread = NULL;
+
+static void stopFramePrep(void) {
+	pthread_mutex_lock(&video_prep_mutex);
+	video_prep_stop = 1;
+	pthread_cond_signal(&video_prep_cond);
+	pthread_mutex_unlock(&video_prep_mutex);
+	if (prepare_thread) SDL_WaitThread(prepare_thread, NULL);
+	prepare_thread = NULL;
+	video_prep_stop = video_prep_requested = overlayUpdated = 0;
+	free(pending_overlay_path);
+	pending_overlay_path = NULL;
+	SDL_FreeSurface(frame_prep.loaded_overlay);
+	frame_prep.loaded_overlay = NULL;
+	frame_prep.overlay_ready = 0;
+}
 
 void PLAT_GL_Swap() {
 
@@ -2127,8 +2148,7 @@ void PLAT_GL_Swap() {
 	static int overlayload = 0;
 
 	static GLuint src_textures[2] = {0, 0};
-	static int src_w_last = 0, src_h_last = 0;
-	static GLenum src_format_last = 0;
+	static struct { int w, h; GLenum format; } storage[2];
 	static int last_w = 0, last_h = 0;
 
 	if (shaderResetRequested) {
@@ -2138,7 +2158,7 @@ void PLAT_GL_Swap() {
 			src_textures[0] = src_textures[1] = 0;
 			orig_texture = 0;
 		}
-		src_w_last = src_h_last = 0;
+		memset(storage, 0, sizeof(storage));
 		last_w = last_h = 0;
 		if (effect_tex) {
 			glDeleteTextures(1, &effect_tex);
@@ -2199,7 +2219,6 @@ void PLAT_GL_Swap() {
 	pthread_mutex_lock(&video_prep_mutex);
 	int overlay_ready = frame_prep.overlay_ready;
 	SDL_Surface* loaded_overlay = frame_prep.loaded_overlay;
-	pthread_mutex_unlock(&video_prep_mutex);
 
 	if (overlay_ready) {
 		if(loaded_overlay) {
@@ -2221,10 +2240,9 @@ void PLAT_GL_Swap() {
 			}
 			overlay_tex = 0;
 		}
-		pthread_mutex_lock(&video_prep_mutex);
-        frame_prep.overlay_ready = 0;
-		pthread_mutex_unlock(&video_prep_mutex);
+		frame_prep.overlay_ready = 0;
     }
+	pthread_mutex_unlock(&video_prep_mutex);
 
 	if (!orig_texture || reloadShaderTextures) {
         // if (orig_texture) {
@@ -2254,28 +2272,33 @@ void PLAT_GL_Swap() {
             glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, pitch565 / 2);
         }
-        const int respecify = vid.blit->src_w != src_w_last || vid.blit->src_h != src_h_last || format != src_format_last || reloadShaderTextures;
-        if (respecify || vid.blit->src_dirty) {
-            new_pixels = 1;
-            // the texture this upload leaves idle needs the same storage for the upload after it
-            if (respecify) glTexImage2D(GL_TEXTURE_2D, 0, format, vid.blit->src_w, vid.blit->src_h, 0, format, type, NULL);
-
-            // The GPU may still be drawing the previous frame from its texture, and PowerVR allocates
-            // fresh storage for an upload into a texture that is in use. Take the other one.
-            orig_texture = src_textures[orig_texture == src_textures[0]];
-            glBindTexture(GL_TEXTURE_2D, orig_texture);
-            if (respecify) {
-                glTexImage2D(GL_TEXTURE_2D, 0, format, vid.blit->src_w, vid.blit->src_h, 0, format, type, vid.blit->src);
-                src_w_last = vid.blit->src_w;
-                src_h_last = vid.blit->src_h;
-                src_format_last = format;
-                orig_w = vid.blit->src_w;
-                orig_h = vid.blit->src_h;
-                origtex_w = vid.blit->src_w;
-                origtex_h = vid.blit->src_h;
+        if (vid.blit->src_dirty || reloadShaderTextures || orig_w != vid.blit->src_w || orig_h != vid.blit->src_h || !storage[orig_texture == src_textures[1]].w) {
+            int slot = orig_texture == src_textures[0];
+            glBindTexture(GL_TEXTURE_2D, src_textures[slot]);
+            int w = vid.blit->src_w, h = vid.blit->src_h;
+            if (storage[slot].w != w || storage[slot].h != h || storage[slot].format != format) {
+                // SDL and the shader setup share GL error state. Attribute only this allocation's error to it.
+                while (glGetError() != GL_NO_ERROR) {}
+                glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, type, vid.blit->src);
+                GLenum error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    if (vid.blit->src_dirty) LOG_error("Source texture %dx%d allocation failed (GL 0x%x)\n", w, h, error);
+                    storage[slot].w = 0;
+                    vid.blit->src_dirty = 1;
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                    return;
+                }
+                storage[slot].w = w;
+                storage[slot].h = h;
+                storage[slot].format = format;
             } else {
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, vid.blit->src_w, vid.blit->src_h, format, type, vid.blit->src);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, format, type, vid.blit->src);
             }
+            orig_texture = src_textures[slot];
+            orig_w = origtex_w = w;
+            orig_h = origtex_h = h;
+            new_pixels = 1;
         }
         if (pitch565) {
             // every other upload in this context assumes the defaults
@@ -2308,15 +2331,16 @@ void PLAT_GL_Swap() {
     // none has come for 120 frames. The copy has to be provably exact for the picture to stay the same:
     // nearest filter, and a framebuffer with the 8 bits per channel of the FBO it replaces.
     static int frames_since_duplicate = 0;
-    static GLint green_bits = 0;
-    if (!green_bits) {
-        green_bits = 8; // kept where the query no longer exists (desktop core profile)
-        glGetIntegerv(GL_GREEN_BITS, &green_bits);
-    }
     if (!new_pixels) frames_since_duplicate = 0;
     else if (frames_since_duplicate < 120) frames_since_duplicate++;
-    const int direct = nrofshaders > 0 && shaders[nrofshaders - 1].scale == 9 && frames_since_duplicate >= 120
-        && s_pass_finalscale.filter == GL_NEAREST && green_bits == 8 && !shaders[nrofshaders - 1].program->window_dependent;
+    // Exact shipped sources whose vertex stage uses position only to cover the viewport.
+    // User replacements, including replacements for the final blit, keep the full shader chain.
+    uint32_t last_hash = nrofshaders ? shaders[nrofshaders - 1].program->source_hash : 0;
+    int known_pass = last_hash == 0x56abc39eu /* stock */ || last_hash == 0xb8261b78u /* pixellate */
+        || last_hash == 0x24325a91u /* lcd3x */;
+    const int direct = known_pass && direct_framebuffer && s_shader_default.source_hash == 0x0d3ce629u
+        && shaders[nrofshaders - 1].program->shader_p && shaders[nrofshaders - 1].scale == 9
+        && s_pass_finalscale.filter == GL_NEAREST && frames_since_duplicate >= 120;
 
     for (int i = 0; i < nrofshaders; i++) {
         int src_w = last_w;
@@ -2372,8 +2396,7 @@ void PLAT_GL_Swap() {
     valid_passes = nrofshaders - direct;
 
     if (direct) {
-        // the last pass's FBO texture missed this frame and any reload: rebuild it when it is next used
-        shaders[nrofshaders - 1].target_updated = 1;
+        if (reloadShaderTextures) shaders[nrofshaders - 1].target_updated = 1;
     }
     else if (nrofshaders > 0) {
 		//LOG_info("Shader Pass: Scale to screen (pipeline size: %d)\n", nrofshaders);

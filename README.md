@@ -17,8 +17,9 @@ Releases from `pvaibhav` will combine upstream `main` with those changes.
 [Download the latest fork release](https://github.com/pvaibhav/NextUI/releases/latest).
 On an existing fork install, open **Updater (pvaibhav)** and choose **Quick Update** for the firmware or **Full Update** to include Extras.
 
-Version `v6.15.0-pvaibhav.4` reduces CPU and GPU work during gameplay.
-See the [release notes](RELEASE_NOTES.md) for the changes to video, audio, and power use.
+Version `v6.15.0-pvaibhav.4` improves the performance of `minarch`, the app that runs your games.
+Your handheld uses less power during gameplay, which can mean more play time on a charge.
+See the [release notes](RELEASE_NOTES.md) for what to expect after updating.
 
 ## Experimental features
 

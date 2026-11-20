@@ -48,9 +48,6 @@ static void limitFF(void) {
 }
 
 void run_frame(void) {
-	// Audio buffered outside core.run() came from loading, resetting or
-	// restoring state; playing it after the change would be stale.
-	Audio_discard();
 	Cheats_apply();
 
 	// if rewind is toggled, fast-forward toggle must stay off; fast-forward hold pauses rewind

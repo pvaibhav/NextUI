@@ -941,6 +941,15 @@ static void rgb565_to_rgb888(uint32_t rgb565, uint8_t *r, uint8_t *g, uint8_t *b
 static char* effect_path;
 static int effectUpdated = 0;
 static pthread_mutex_t video_prep_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t video_prep_cond = PTHREAD_COND_INITIALIZER;
+static int video_prep_requested = 0;
+
+static void wakeFramePrep(void) {
+	pthread_mutex_lock(&video_prep_mutex);
+	video_prep_requested = 1;
+	pthread_cond_signal(&video_prep_cond);
+	pthread_mutex_unlock(&video_prep_mutex);
+}
 
 static void updateEffect(void) {
 	// Read effect state with mutex protection
@@ -1056,6 +1065,7 @@ void PLAT_setOverlay(const char* filename, const char* tag) {
     if (!filename || strcmp(filename, "") == 0 || strcmp(filename, "None") == 0) {
 		overlay_path = strdup("");
         LOG_info("Skipping overlay update.\n");
+		wakeFramePrep();
         return;
     }
 
@@ -1064,11 +1074,13 @@ void PLAT_setOverlay(const char* filename, const char* tag) {
 
     if (!overlay_path) {
         perror("malloc failed");
+		wakeFramePrep();
         return;
     }
 
     snprintf(overlay_path, path_len, "%s/%s/%s", OVERLAYS_FOLDER, tag, filename);
     LOG_info("Overlay path set to: %s\n", overlay_path);
+	wakeFramePrep();
 
 }
 
@@ -1616,11 +1628,13 @@ void PLAT_setEffect(int next_type) {
 	pthread_mutex_lock(&video_prep_mutex);
 	effect.next_type = next_type;
 	pthread_mutex_unlock(&video_prep_mutex);
+	wakeFramePrep();
 }
 void PLAT_setEffectColor(int next_color) {
 	pthread_mutex_lock(&video_prep_mutex);
 	effect.next_color = next_color;
 	pthread_mutex_unlock(&video_prep_mutex);
+	wakeFramePrep();
 }
 void PLAT_vsync(int remaining) {
 	if (remaining>0) SDL_Delay(remaining);
@@ -1630,8 +1644,10 @@ void PLAT_vsync(int remaining) {
 scaler_t PLAT_getScaler(GFX_Renderer* renderer) {
 	// LOG_info("getScaler for scale: %i\n", renderer->scale);
 	pthread_mutex_lock(&video_prep_mutex);
+	int changed = effect.next_scale != renderer->scale;
 	effect.next_scale = renderer->scale;
 	pthread_mutex_unlock(&video_prep_mutex);
+	if (changed) wakeFramePrep();
 	return scale1x1_c16;
 }
 
@@ -2044,7 +2060,11 @@ int prepareFrameThread(void *data) {
 			}
         }
 
-        SDL_Delay(120);
+		pthread_mutex_lock(&video_prep_mutex);
+		while (!video_prep_requested)
+			pthread_cond_wait(&video_prep_cond, &video_prep_mutex);
+		video_prep_requested = 0;
+		pthread_mutex_unlock(&video_prep_mutex);
     }
     return 0;
 }

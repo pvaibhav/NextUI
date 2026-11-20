@@ -1,6 +1,6 @@
 # v6.15.0-pvaibhav.4
 
-Your handheld uses less power while you play, which can mean more play time on a charge.
+This release optimises `minarch`, the app that runs your games. It spends less time drawing frames and processing audio, so your handheld can run cooler and last longer on a charge. The difference depends on your device, the game, and your settings.
 
 - To keep the previous **High** audio quality, select **Very High** under **Audio Resampling Quality**.
 - NES and Famicom Disk System games now default to **Low** sound quality to use less power.

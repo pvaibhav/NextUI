@@ -941,8 +941,8 @@ void GFX_flip_fixed_rate(SDL_Surface *screen, double target_fps)
 
 			// The OS scheduling algorithm cannot guarantee that
 			// the sleep will last the exact amount of requested time.
-			// We sleep as much as we can using the OS primitive.
-			const useconds_t min_waiting_time = 2000;
+			// Sleep as much as we can and keep only a short spin tail.
+			const useconds_t min_waiting_time = 300;
 			if (time_to_sleep_us > min_waiting_time)
 			{
 				usleep(time_to_sleep_us - min_waiting_time);
@@ -4517,9 +4517,9 @@ static void PWR_waitForWake(void)
 			pwr.requested_wake = 0;
 			break;
 		}
+		SDL_Delay(200);
 		if (sleepDelay > 0)
 		{
-			SDL_Delay(200);
 			if (SDL_GetTicks() - sleep_ticks >= sleepDelay)
 			{ // increased to two minutes
 				if (SDL_AtomicGet(&pwr.is_charging) ||

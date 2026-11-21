@@ -66,7 +66,8 @@ void run_frame(void) {
 			fast_forward = 0;
 			// Poll input manually since core.run() isn't called
 			input_poll_callback();
-			// Skip core.run() entirely to avoid advancing the game
+			// Yield briefly while waiting for the next rewind cadence tick
+			SDL_Delay(1);
 		}
 		else {
 			int hold_empty = rewind_ctx.enabled && rewind_pressed && !rewind_toggle;
@@ -75,6 +76,7 @@ void run_frame(void) {
 				rewinding = was_rewinding ? 1 : 0;
 				// Poll input manually so release is detected while core.run() is skipped
 				input_poll_callback();
+				GFX_delay();
 			} else {
 				// Buffer empty: auto untoggle rewind, resume FF if it was paused for a hold
 				if (rewind_toggle) rewind_toggle = 0;

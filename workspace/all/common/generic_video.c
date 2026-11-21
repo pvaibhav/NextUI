@@ -36,7 +36,6 @@ static int reloadShaderTextures = 1;
 static int shaderResetRequested = 0;
 // leading user shader passes whose FBO output still matches the source texture
 static int valid_passes = 0;
-static int direct_framebuffer;
 
 static SDL_BlendMode getPremultipliedBlendMode(void) {
 	return SDL_ComposeCustomBlendMode(
@@ -66,7 +65,6 @@ typedef struct ShaderProgram {
 	GLint u_Texture;
 	GLint u_OrigTexture;
 	GLint u_texelSize;
-	uint32_t source_hash;
 	
 	ShaderParam *pragmas;  // Dynamic array of parsed pragma parameters
 	int num_pragmas;       // Count of valid pragma parameters
@@ -505,7 +503,6 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 	for (const unsigned char *c = (const unsigned char *)source; *c; c++)
 		hash = (hash ^ *c) * 16777619u;
 	free(source);
-	shader->source_hash = hash;
 
 	GLuint vertex_shader1 = load_shader_from_file(GL_VERTEX_SHADER, filepath);
 	GLuint fragment_shader1 = load_shader_from_file(GL_FRAGMENT_SHADER, filepath);
@@ -563,21 +560,6 @@ void init_shader_program(ShaderProgram * shader, const char * path, const char *
 
 void PLAT_initShaders() {
 	SDL_GL_MakeCurrent(vid.window, vid.gl_context);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	GLint red = 0, green = 0, blue = 0, alpha = 0, samples = -1, encoding = 0, component = 0;
-	GLenum attachment = GL_BACK;
-#ifdef GL_BACK_LEFT
-	if (!strcmp(PLAT_getModel(), "Desktop")) attachment = GL_BACK_LEFT;
-#endif
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &red);
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &green);
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &blue);
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alpha);
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &encoding);
-	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &component);
-	glGetIntegerv(GL_SAMPLES, &samples);
-	direct_framebuffer = red == 8 && green == 8 && blue == 8 && (alpha == 0 || alpha == 8)
-		&& samples == 0 && encoding == GL_LINEAR && component == GL_UNSIGNED_NORMALIZED;
 	glViewport(0, 0, device_width, device_height);
 
 	// Init user shaders
@@ -1836,9 +1818,6 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 
 	const GLuint shader_program_handle = shader_program->shader_p;
 
-	// a user pass drawn straight to the screen instead of through the final pass
-	const int direct = !target_texture && nrofshaders > 0 && shader_pass == &shaders[nrofshaders - 1];
-
 	while ((pre_err = glGetError()) != GL_NO_ERROR) {
 		(void)pre_err;
 	}
@@ -1886,21 +1865,13 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 			-1.0f,  1.0f, 0.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f,  // top-left
 			-1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f,  // bottom-left
 			1.0f,  1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f, 0.0f,  // top-right
-			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f,  // bottom-right
-			// The same quad upside down. User shaders leave the image the way FBOs store it and rely on
-			// default.glsl to flip it for the screen, so a direct pass has to be drawn flipped.
-			-1.0f,  1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f,
-			-1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f,
-			1.0f,  1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f,
-			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f, 0.0f
+			1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 0.0f, 0.0f, 0.0f   // bottom-right
 		};
 
 		glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 	}
 
-	// With one user pass and no overlay, a direct pass is the only program that ever runs, and its
-	// uniforms still change: the frame counter, and parameters edited in the menu.
-	if (shader_program_handle != last_program || direct) {
+	if (shader_program_handle != last_program) {
 		GLint posAttrib = glGetAttribLocation(shader_program_handle, "VertexCoord");
 		if (posAttrib >= 0) {
 			glVertexAttribPointer(posAttrib, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
@@ -2009,7 +1980,7 @@ void runShaderPass(ShaderPass * shader_pass, GLuint src_texture,
 		last_texelSize[0] = texelSize[0];
 		last_texelSize[1] = texelSize[1];
 	}
-    glDrawArrays(GL_TRIANGLE_STRIP, direct ? 4 : 0, 4);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	last_program = shader_program_handle;
 }
 
@@ -2329,28 +2300,12 @@ void PLAT_GL_Swap() {
         first_pass = valid_passes;
         for (int i = 0; i < nrofshaders; i++) {
             // a pass that reads the frame counter draws something new every frame
-            if ((i < first_pass && shaders[i].target_updated) || shaders[i].program->u_FrameCount >= 0) first_pass = 0;
+            if (shaders[i].target_updated || shaders[i].program->u_FrameCount >= 0) first_pass = 0;
         }
     }
     memcpy(pass_dims, dims, sizeof(dims));
     // runShaderPass skips the bind when its input is the texture it bound last, but the upload code above bound another one
     if (first_pass > 0) glBindTexture(GL_TEXTURE_2D, shaders[first_pass - 1].target_texture);
-
-    // A last pass that already has the size of the picture on screen can draw there itself, which saves
-    // the final 1:1 copy. That leaves no output to reuse on a duplicate frame, so it is only done while
-    // none has come for 120 frames. The copy has to be provably exact for the picture to stay the same:
-    // nearest filter, and a framebuffer with the 8 bits per channel of the FBO it replaces.
-    static int frames_since_duplicate = 0;
-    if (!new_pixels) frames_since_duplicate = 0;
-    else if (frames_since_duplicate < 120) frames_since_duplicate++;
-    // Exact shipped sources whose vertex stage uses position only to cover the viewport.
-    // User replacements, including replacements for the final blit, keep the full shader chain.
-    uint32_t last_hash = nrofshaders ? shaders[nrofshaders - 1].program->source_hash : 0;
-    int known_pass = last_hash == 0x56abc39eu /* stock */ || last_hash == 0xb8261b78u /* pixellate */
-        || last_hash == 0x24325a91u /* lcd3x */;
-    const int direct = known_pass && direct_framebuffer && s_shader_default.source_hash == 0x0d3ce629u
-        && shaders[nrofshaders - 1].program->shader_p && shaders[nrofshaders - 1].scale == 9
-        && s_pass_finalscale.filter == GL_NEAREST && frames_since_duplicate >= 120;
 
     for (int i = 0; i < nrofshaders; i++) {
         int src_w = last_w;
@@ -2392,23 +2347,19 @@ void PLAT_GL_Swap() {
         }
         shaderinfocount++;
 
-        const int to_screen = direct && i == nrofshaders - 1;
         if (i >= first_pass) runShaderPass(
 			&shaders[i],
 			(i == 0) ? orig_texture : shaders[i - 1].target_texture,
-			to_screen ? NULL : &shaders[i].target_texture,
+			&shaders[i].target_texture,
 			(i == nrofshaders - 1) ? s_pass_finalscale.filter : shaders[i+1].filter,
-			to_screen ? dst_rect.x : 0, to_screen ? dst_rect.y : 0, dst_w, dst_h);
+			0, 0, dst_w, dst_h);
 
         last_w = dst_w;
         last_h = dst_h;
     }
-    valid_passes = nrofshaders - direct;
+    valid_passes = nrofshaders;
 
-    if (direct) {
-        if (reloadShaderTextures) shaders[nrofshaders - 1].target_updated = 1;
-    }
-    else if (nrofshaders > 0) {
+    if (nrofshaders > 0) {
 		//LOG_info("Shader Pass: Scale to screen (pipeline size: %d)\n", nrofshaders);
 		s_pass_finalscale.srcw = s_pass_finalscale.texw = last_w;
 		s_pass_finalscale.srch = s_pass_finalscale.texh = last_h;

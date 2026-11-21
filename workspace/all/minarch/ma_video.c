@@ -765,23 +765,9 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	// return;
 
 	Special_render();
-	
+
 	static uint32_t last_flip_time = 0;
-	
-	// 10 seems to be the sweet spot that allows 2x in NES and SNES and 8x in GB at 60fps
-	// 14 will let GB hit 10x but NES and SNES will drop to 1.5x at 30fps (not sure why)
-	// but 10 hurts PS...
-	// TODO: 10 was based on rg35xx, probably different results on other supported platforms
-	if (fast_forward && SDL_GetTicks()-last_flip_time<10) return;
-	
-	// FFVII menus 
-	// 16: 30/200
-	// 15: 30/180
-	// 14: 45/180
-	// 12: 30/150
-	// 10: 30/120 (optimize text off has no effect)
-	//  8: 60/210 (with optimize text off)
-	// eg. PS@10 60/240
+	if (fast_forward && SDL_GetTicks() - last_flip_time < 16) return;
 
 	// if source has changed size (or forced by dst_p==0)
 	// eg. true src + cropped src + fixed dst + cropped dst
@@ -857,22 +843,14 @@ static inline void convert_rgb565_to_rgba_neon(const uint16_t* __restrict src, u
 	vst4_u8((uint8_t*)dst, rgba);
 }
 
-// Convert 4 XRGB8888 pixels to RGBA using NEON (processes 16 bytes → 16 bytes)
+// Convert 8 XRGB8888 pixels to RGBA using NEON vld4/vst4 (32 bytes -> 32 bytes)
 static inline void convert_xrgb8888_to_rgba_neon(const uint32_t* __restrict src, uint32_t* __restrict dst) {
-	// Load 4 XRGB8888 pixels
-	uint32x4_t xrgb = vld1q_u32(src);
-	
-	// XRGB8888: 0xXXRRGGBB → RGBA: 0xAABBGGRR
-	// Extract components
-	uint32x4_t r = vandq_u32(vshrq_n_u32(xrgb, 16), vdupq_n_u32(0xFF));
-	uint32x4_t g = vandq_u32(vshrq_n_u32(xrgb, 8), vdupq_n_u32(0xFF));
-	uint32x4_t b = vandq_u32(xrgb, vdupq_n_u32(0xFF));
-	uint32x4_t a = vdupq_n_u32(0xFF);
-	
-	// Reconstruct as RGBA
-	uint32x4_t rgba = vorrq_u32(vorrq_u32(r, vshlq_n_u32(g, 8)), vorrq_u32(vshlq_n_u32(b, 16), vshlq_n_u32(a, 24)));
-	
-	vst1q_u32(dst, rgba);
+	uint8x8x4_t bgra = vld4_u8((const uint8_t*)src);
+	uint8x8_t tmp = bgra.val[0];
+	bgra.val[0] = bgra.val[2];
+	bgra.val[2] = tmp;
+	bgra.val[3] = vdup_n_u8(0xFF);
+	vst4_u8((uint8_t*)dst, bgra);
 }
 #endif
 
@@ -887,8 +865,8 @@ static void convert_xrgb8888_to_rgba(const void* src, uint32_t* dst, unsigned wi
 		unsigned x = 0;
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
-		// NEON: process 4 pixels at a time
-		for (; x + 3 < width; x += 4) {
+		// NEON: process 8 pixels at a time
+		for (; x + 7 < width; x += 8) {
 			convert_xrgb8888_to_rgba_neon(srcRow + x, dstRow + x);
 		}
 #else
@@ -992,7 +970,7 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 	// duplicate can be re-uploaded after a context reset or converted when a CPU effect is enabled.
 	uint16_t *packed = (uint16_t *)(rgbaData + pixels);
 	const size_t packed_pitch = width * sizeof(*packed);
-	int can_upload_565 = !show_debug && !ambient_mode && !fast_forward &&
+	int can_upload_565 = !show_debug &&
 		screen_scaling != SCALE_CROPPED && fadein_frame >= FADEIN_FRAMES;
 	if (data) {
 		frame_width = width;
@@ -1018,7 +996,7 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 
 	// Set ambient lighting color (if enabled)
 	if (ambient_mode && !fast_forward && data) {
-		GFX_setAmbientColor(data, width, height, pitch, ambient_mode);
+		GFX_setAmbientColor(data, width, height, retained_565 ? packed_pitch : pitch, retained_565, ambient_mode);
 	}
 
 

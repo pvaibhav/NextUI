@@ -13,7 +13,7 @@ int main (int argc, char *argv[]) {
 	SetSaturation(GetSaturation());
 	SetExposure(GetExposure());
 	SetRawDisplayCal(
-		GetDisplayCalEnabled(),
+		GetDisplayCalMode(),
 		GetDisplayCalRedGain(),
 		GetDisplayCalGreenGain(),
 		GetDisplayCalBlueGain());

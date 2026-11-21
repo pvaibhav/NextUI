@@ -18,8 +18,10 @@
 
 ///////////////////////////////////////
 
-// First H700 settings format. Prerelease formats intentionally reset to defaults.
-typedef struct SettingsV1 {
+// V2 renames displaycal_enabled to displaycal_mode (OFF/ON/CUSTOM) in place.
+// Layout is identical to V1, and OFF=0/ON=1 match the old flag values, so V1
+// records migrate with a plain copy. Prerelease formats reset to defaults.
+typedef struct SettingsV2 {
 	int version; // future proofing
 	int brightness;
 	int colortemperature;
@@ -32,15 +34,15 @@ typedef struct SettingsV1 {
 	// NOTE: doesn't really need to be persisted but still needs to be shared
 	int jack;
 	int audiosink; // AUDIO_SINK_*
-	int displaycal_enabled;
+	int displaycal_mode;
 	int displaycal_red_gain;
 	int displaycal_green_gain;
 	int displaycal_blue_gain;
-} SettingsV1;
+} SettingsV2;
 
 // Future format changes must update this version and the loader together.
-#define SETTINGS_VERSION 1
-typedef SettingsV1 Settings;
+#define SETTINGS_VERSION 2
+typedef SettingsV2 Settings;
 static Settings DefaultSettings = {
 	.version = SETTINGS_VERSION,
 	.brightness = SETTINGS_DEFAULT_BRIGHTNESS,
@@ -52,7 +54,7 @@ static Settings DefaultSettings = {
 	.exposure = SETTINGS_DEFAULT_EXPOSURE,
 	.jack = 0,
 	.audiosink = AUDIO_SINK_DEFAULT,
-	.displaycal_enabled = DISPLAYCAL_DEFAULT_ENABLED,
+	.displaycal_mode = DISPLAYCAL_DEFAULT_MODE,
 	.displaycal_red_gain = DISPLAYCAL_DEFAULT_RED_GAIN,
 	.displaycal_green_gain = DISPLAYCAL_DEFAULT_GREEN_GAIN,
 	.displaycal_blue_gain = DISPLAYCAL_DEFAULT_BLUE_GAIN,
@@ -130,20 +132,25 @@ static enum DisplayCalPreset displayCalPresetForDevice(void) {
 
 static void applyDisplayCalDefaultsForDevice(Settings *target) {
 	DisplayCalDefaults defaults = DisplayCal_getDefaultSettings(displayCalPresetForDevice());
-	target->displaycal_enabled = defaults.enabled;
+	target->displaycal_mode = defaults.mode;
 	target->displaycal_red_gain = defaults.red_gain;
 	target->displaycal_green_gain = defaults.green_gain;
 	target->displaycal_blue_gain = defaults.blue_gain;
 }
 
-// Accept only a complete V1 record; old prerelease and damaged files use defaults.
+// Accept only a complete record; old prerelease and damaged files use defaults.
+// V1 and V2 share the same layout, so V1 migrates with a plain version bump:
+// persisted enabled 0/1 already equals OFF/ON.
 static void loadSettings(void) {
 	FILE *file = fopen(SettingsPath, "rb");
 	if (!file) return;
 
 	Settings saved;
 	if (fread(&saved, sizeof(saved), 1, file) == 1 &&
-		saved.version == SETTINGS_VERSION && fgetc(file) == EOF && !ferror(file)) {
+		(saved.version == 1 || saved.version == SETTINGS_VERSION) &&
+		fgetc(file) == EOF && !ferror(file)) {
+		saved.version = SETTINGS_VERSION;
+		saved.displaycal_mode = DisplayCal_clampModeValue(saved.displaycal_mode);
 		memcpy(settings, &saved, sizeof(saved));
 	}
 	fclose(file);
@@ -189,8 +196,8 @@ void InitSettings(void) {
 	SetContrast(GetContrast());
 	SetSaturation(GetSaturation());
 	SetExposure(GetExposure());
-	if (settings->displaycal_enabled)
-		SetRawDisplayCal(1, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
+	if (settings->displaycal_mode != DISPLAYCAL_MODE_OFF)
+		SetRawDisplayCal(settings->displaycal_mode, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
 }
 int InitializedSettings(void) {
 	return (settings != NULL);
@@ -209,8 +216,8 @@ static inline void SaveSettings(void) {
 }
 
 static inline void applyDisplayCalSettings(void) {
-	if (settings->displaycal_enabled)
-		SetRawDisplayCal(1, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
+	if (settings->displaycal_mode != DISPLAYCAL_MODE_OFF)
+		SetRawDisplayCal(settings->displaycal_mode, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
 }
 
 ///////// Getters exposed in public API
@@ -239,9 +246,9 @@ int GetExposure(void)
 {
 	return settings->exposure;
 }
-int GetDisplayCalEnabled(void)
+int GetDisplayCalMode(void)
 {
-	return settings->displaycal_enabled;
+	return settings->displaycal_mode;
 }
 int GetDisplayCalRedGain(void)
 {
@@ -301,16 +308,16 @@ void SetExposure(int value){
 	settings->exposure = value;
 	SaveSettings();
 }
-void SetDisplayCalEnabled(int is_enabled) {
-	int was_enabled = settings->displaycal_enabled;
-	is_enabled = (is_enabled != 0);
-	settings->displaycal_enabled = is_enabled;
+void SetDisplayCalMode(int mode) {
+	int was_off = (settings->displaycal_mode == DISPLAYCAL_MODE_OFF);
+	mode = DisplayCal_clampModeValue(mode);
+	settings->displaycal_mode = mode;
 
-	// Disabling only needs hardware writes when we are turning an active LUT off.
-	if (is_enabled)
+	// Switching off only needs hardware writes when turning an active LUT off.
+	if (mode != DISPLAYCAL_MODE_OFF)
 		applyDisplayCalSettings();
-	else if (was_enabled)
-		SetRawDisplayCal(0, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
+	else if (!was_off)
+		SetRawDisplayCal(DISPLAYCAL_MODE_OFF, settings->displaycal_red_gain, settings->displaycal_green_gain, settings->displaycal_blue_gain);
 	SaveSettings();
 }
 void SetDisplayCalRedGain(int value) {
@@ -923,13 +930,27 @@ void SetRawSaturation(int val){
 void SetRawExposure(int val){
 	(void)val;
 }
-void SetRawDisplayCal(int enabled, int red_gain, int green_gain, int blue_gain) {
-	int ret = enabled
-		? DisplayCal_enableWithValues(red_gain, green_gain, blue_gain)
-		: DisplayCal_disable();
-	if (ret != 0) {
-		fprintf(stderr, "SetRawDisplayCal failed to %s display calibration: %i\n",
-			enabled ? "enable" : "disable", ret);
-		fflush(stderr);
+void SetRawDisplayCal(int mode, int red_gain, int green_gain, int blue_gain) {
+	mode = DisplayCal_clampModeValue(mode);
+
+	if (mode == DISPLAYCAL_MODE_OFF) {
+		if (DisplayCal_disable() != 0)
+			fprintf(stderr, "SetRawDisplayCal failed to disable display calibration\n");
+		return;
 	}
+	if (mode == DISPLAYCAL_MODE_ON) {
+		// Models without a bundled (or with an unreadable) .cube file use
+		// the gain-derived LUT from their per-model defaults. Stored user
+		// gains only ever apply in Custom mode.
+		if (DisplayCal_enableWithDeviceFile() != 0) {
+			DisplayCalDefaults defaults = DisplayCal_getDefaultSettings(displayCalPresetForDevice());
+			fprintf(stderr, "SetRawDisplayCal no device LUT, using default gains\n");
+			if (DisplayCal_enableWithValues(defaults.red_gain, defaults.green_gain, defaults.blue_gain) != 0)
+				fprintf(stderr, "SetRawDisplayCal failed to apply gain fallback\n");
+		}
+		return;
+	}
+	if (DisplayCal_enableWithValues(red_gain, green_gain, blue_gain) != 0)
+		fprintf(stderr, "SetRawDisplayCal failed to apply custom gains\n");
+	fflush(stderr);
 }

@@ -137,6 +137,19 @@ static const std::vector<std::string> sleep_timeout_labels = {"5s", "10s", "15s"
 
 static const std::vector<std::string> on_off = {"Off", "On"};
 
+static const std::vector<std::any> colour_correction_modes = {(int)DISPLAYCAL_MODE_OFF, (int)DISPLAYCAL_MODE_ON, (int)DISPLAYCAL_MODE_CUSTOM};
+static const std::vector<std::string> colour_correction_labels = {"Off", "On", "Custom"};
+
+// Gains only take effect in Custom mode, so editing a slider while On moves
+// there first, keeping edits live. Reset paths call the setters directly
+// and are unaffected.
+static void switchDisplayCalToCustom(MenuItem *modeItem) {
+    if (GetDisplayCalMode() == DISPLAYCAL_MODE_ON) {
+        SetDisplayCalMode(DISPLAYCAL_MODE_CUSTOM);
+        modeItem->reselect();
+    }
+}
+
 static const std::vector<std::string> scaling_strings = {"Fullscreen", "Fit", "Fill"};
 static const std::vector<std::any> scaling = {(int)GFX_SCALE_FULLSCREEN, (int)GFX_SCALE_FIT, (int)GFX_SCALE_FILL};
 
@@ -612,25 +625,26 @@ int main(int argc, char *argv[])
                 deviceInfo.getModel() == DeviceInfo::RG40XXV ? DISPLAYCAL_PRESET_RG40XXV :
                 deviceInfo.getModel() == DeviceInfo::RGCubeXX ? DISPLAYCAL_PRESET_RGCUBEXX :
                 DISPLAYCAL_PRESET_DEFAULT);
+            auto colourCorrectionItem =
+                new MenuItem{ListItemType::Generic, "Colour correction", "Corrects the display colours to better match the \nsRGB standard, at the expense of some peak brightness.", colour_correction_modes, colour_correction_labels, []() -> std::any
+                { return GetDisplayCalMode(); }, [](const std::any &value)
+                { SetDisplayCalMode(std::any_cast<int>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalMode(defaultDisplayCal.mode); }};
+            displayItems.push_back(colourCorrectionItem);
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "White point correction", "Corrects the display white point to better match the \nsRGB standard, at the expense of some peak brightness.", {false, true}, on_off, []() -> std::any
-                { return GetDisplayCalEnabled() != 0; }, [](const std::any &value)
-                { SetDisplayCalEnabled(std::any_cast<bool>(value)); },
-                [defaultDisplayCal]() { SetDisplayCalEnabled(defaultDisplayCal.enabled); }});
-            displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Red gain", "White point correction red channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalRedGain(); }, [](const std::any &value)
-                { SetDisplayCalRedGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Red gain", "Red level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalRedGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalRedGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalRedGain(defaultDisplayCal.red_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Green gain", "White point correction green channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalGreenGain(); }, [](const std::any &value)
-                { SetDisplayCalGreenGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Green gain", "Green level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalGreenGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalGreenGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalGreenGain(defaultDisplayCal.green_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Blue gain", "White point correction blue channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalBlueGain(); }, [](const std::any &value)
-                { SetDisplayCalBlueGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Blue gain", "Blue level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalBlueGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalBlueGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalBlueGain(defaultDisplayCal.blue_gain); }});
         }
         displayItems.push_back(

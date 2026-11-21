@@ -162,7 +162,7 @@ void Game_changeDisc(char* path) {
 
 int extract_zip(char** extensions)
 {
-	char buf[100];
+	static char buf[65536];
 	struct zip *za;
 	int ze;
 	if ((za = zip_open(game.path, 0, &ze)) == NULL) {
@@ -246,19 +246,31 @@ int extract_zip(char** extensions)
 
 				sum = 0;
 				while (sum != sb.size) {
-					len = zip_fread(zf, buf, 100);
-					if (len < 0) {
-						LOG_error( "zip_fread failed\n");
-						close(fd);
-						zip_fclose(zf);
-						return 0;
+					len = zip_fread(zf, buf, sizeof(buf));
+					if (len <= 0) {
+						LOG_error(len < 0 ? "zip_fread failed\n" : "zip_fread unexpected EOF\n");
+						goto extract_fail;
 					}
-					write(fd, buf, len);
+					ssize_t off = 0;
+					while (off < len) {
+						ssize_t written = write(fd, buf + off, (size_t)(len - off));
+						if (written < 0) {
+							if (errno == EINTR) continue;
+							LOG_error("write failed: %s\n", strerror(errno));
+							goto extract_fail;
+						}
+						off += written;
+					}
 					sum += len;
 				}
 				close(fd);
 				zip_fclose(zf);
 				return 1;
+			extract_fail:
+				close(fd);
+				unlink(game.tmp_path);
+				zip_fclose(zf);
+				return 0;
 			}
 		}
 	}

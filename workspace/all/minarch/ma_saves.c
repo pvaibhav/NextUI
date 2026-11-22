@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "ma_internal.h"
+#include "ma_audio.h"
 #include "ra_integration.h"
 #include "notification.h"
 
@@ -297,6 +298,7 @@ error:
 	if (state) free(state);
 	if (state_file) fclose(state_file);
 #endif
+	if (success) Audio_discard();
 	fast_forward = was_ff;
 	return success;
 }
@@ -368,11 +370,12 @@ error:
 	return success;
 }
 
-void State_autosave(void) {
+int State_autosave(void) {
 	int last_state_slot = state_slot;
 	state_slot = AUTO_RESUME_SLOT;
-	State_write();
+	int success = State_write();
 	state_slot = last_state_slot;
+	return success;
 }
 void State_resume(void) {
 	if (!exists(RESUME_SLOT_PATH)) return;

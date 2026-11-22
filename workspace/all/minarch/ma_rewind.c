@@ -1,4 +1,5 @@
 #include "ma_internal.h"
+#include "ma_audio.h"
 #include "ma_rewind.h"
 
 #include <string.h>
@@ -26,7 +27,7 @@ static RewindBufferState Rewind_buffer_state_locked(void) {
 
 static void* Rewind_worker_thread(void *arg);
 static int Rewind_write_entry_locked(const uint8_t *compressed, size_t dest_len, int is_keyframe);
-static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_keyframe_out);
+static int Rewind_compress_state(uint8_t **src_slot, size_t *dest_len, int *is_keyframe_out);
 static void Rewind_wait_for_worker_idle(void);
 
 void Rewind_free(void) {
@@ -212,8 +213,9 @@ static int Rewind_write_entry_locked(const uint8_t *compressed, size_t dest_len,
 	return 1;
 }
 
-static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_keyframe_out) {
-	if (!rewind_ctx.scratch || !dest_len) return -1;
+static int Rewind_compress_state(uint8_t **src_slot, size_t *dest_len, int *is_keyframe_out) {
+	if (!src_slot || !*src_slot || !rewind_ctx.scratch || !dest_len) return -1;
+	uint8_t *src = *src_slot;
 	if (is_keyframe_out) *is_keyframe_out = 1; // default to keyframe
 	if (!rewind_ctx.compress) {
 		*dest_len = rewind_ctx.state_size;
@@ -232,13 +234,21 @@ static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_k
 	int used_delta = 0;
 	if (rewind_ctx.has_prev_enc && rewind_ctx.prev_state_enc && rewind_ctx.delta_buf) {
 		size_t state_size = rewind_ctx.state_size;
-		uint8_t *delta = rewind_ctx.delta_buf;
-		const uint8_t *prev = rewind_ctx.prev_state_enc;
-		// Byte-by-byte XOR to avoid unaligned memory access issues
-		for (size_t i = 0; i < state_size; i++) {
-			delta[i] = src[i] ^ prev[i];
+		size_t i = 0;
+		uint8_t * __restrict d = rewind_ctx.delta_buf;
+		const uint8_t * __restrict s = src;
+		const uint8_t * __restrict p = rewind_ctx.prev_state_enc;
+		for (; i + sizeof(uint64_t) <= state_size; i += sizeof(uint64_t)) {
+			uint64_t sw, pw;
+			memcpy(&sw, s + i, sizeof(uint64_t));
+			memcpy(&pw, p + i, sizeof(uint64_t));
+			uint64_t dw = sw ^ pw;
+			memcpy(d + i, &dw, sizeof(uint64_t));
 		}
-		compress_src = delta;
+		for (; i < state_size; i++) {
+			d[i] = s[i] ^ p[i];
+		}
+		compress_src = rewind_ctx.delta_buf;
 		used_delta = 1;
 	}
 
@@ -252,9 +262,11 @@ static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_k
 	// Report whether this was a keyframe (full state) or delta
 	if (is_keyframe_out) *is_keyframe_out = used_delta ? 0 : 1;
 
-	// Update prev_state_enc with the current state for next delta
+	// Update prev_state_enc via zero-copy pointer swap with the caller's state_size buffer
 	if (rewind_ctx.prev_state_enc) {
-		memcpy(rewind_ctx.prev_state_enc, src, rewind_ctx.state_size);
+		uint8_t *old_prev = rewind_ctx.prev_state_enc;
+		rewind_ctx.prev_state_enc = src;
+		*src_slot = old_prev;
 		rewind_ctx.has_prev_enc = 1;
 	}
 
@@ -447,7 +459,7 @@ static void* Rewind_worker_thread(void *arg) {
 		int is_keyframe = 1;
 		pthread_mutex_lock(&rewind_ctx.lock);
 		if (gen == rewind_ctx.generation) {
-			int res = Rewind_compress_state(rewind_ctx.capture_pool[slot], &dest_len, &is_keyframe);
+			int res = Rewind_compress_state(&rewind_ctx.capture_pool[slot], &dest_len, &is_keyframe);
 			if (res == 0) {
 				Rewind_write_entry_locked(rewind_ctx.scratch, dest_len, is_keyframe);
 			} else {
@@ -509,7 +521,7 @@ void Rewind_push(int force) {
 				int is_keyframe = 1;
 				pthread_mutex_lock(&rewind_ctx.lock);
 				if (gen == rewind_ctx.generation) {
-					int res = Rewind_compress_state(rewind_ctx.capture_pool[queued_slot], &dest_len, &is_keyframe);
+					int res = Rewind_compress_state(&rewind_ctx.capture_pool[queued_slot], &dest_len, &is_keyframe);
 					if (res == 0) {
 						Rewind_write_entry_locked(rewind_ctx.scratch, dest_len, is_keyframe);
 					} else {
@@ -539,7 +551,7 @@ void Rewind_push(int force) {
 			size_t dest_len = rewind_ctx.scratch_size;
 			int is_keyframe = 1;
 			pthread_mutex_lock(&rewind_ctx.lock);
-			int res = Rewind_compress_state(rewind_ctx.state_buf, &dest_len, &is_keyframe);
+			int res = Rewind_compress_state(&rewind_ctx.state_buf, &dest_len, &is_keyframe);
 			if (res != 0) {
 				pthread_mutex_unlock(&rewind_ctx.lock);
 				LOG_error("Rewind: compression failed (sync fallback) (%i)\n", res);
@@ -581,7 +593,7 @@ void Rewind_push(int force) {
 	size_t dest_len = rewind_ctx.scratch_size;
 	int is_keyframe = 1;
 	pthread_mutex_lock(&rewind_ctx.lock);
-	int res = Rewind_compress_state(rewind_ctx.state_buf, &dest_len, &is_keyframe);
+	int res = Rewind_compress_state(&rewind_ctx.state_buf, &dest_len, &is_keyframe);
 	if (res != 0) {
 		pthread_mutex_unlock(&rewind_ctx.lock);
 		LOG_error("Rewind: compression failed (%i)\n", res);
@@ -699,6 +711,8 @@ int Rewind_step_back(void) {
 		pthread_mutex_unlock(&rewind_ctx.lock);
 		return REWIND_STEP_EMPTY;
 	}
+
+	Audio_discard();
 
 	// pop newest
 	rewind_ctx.entry_head = idx;

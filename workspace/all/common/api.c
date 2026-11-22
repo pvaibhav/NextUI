@@ -15,10 +15,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 
 #include "utils.h"
 #include "config.h"
+#include "cubic_resampler.h"
 
 #include <pthread.h>
 
@@ -169,11 +171,16 @@ static inline uint32_t UintMult(uint32_t color, uint32_t modulate_rgba)
 }
 
 ///////////////////////////////
+// Sentinel for our own Catmull-Rom cubic interpolation (cubic_resampler.c),
+// not a libsamplerate SRC_* converter type. Negative so it cannot collide
+// with libsamplerate's non-negative enum values.
+#define SND_QUALITY_CUBIC -1
 static int qualityLevels[] = {
-	3,
-	4,
-	2,
-	1};
+	SRC_ZERO_ORDER_HOLD,
+	SRC_LINEAR,
+	SND_QUALITY_CUBIC, // our own cubic interpolation (not from libsamplerate)
+	SRC_SINC_FASTEST,
+	SRC_SINC_MEDIUM_QUALITY};
 static struct PWR_Context
 {
 	int initialized;
@@ -352,14 +359,10 @@ FALLBACK_IMPLEMENTATION void PLAT_getGPUTemp()
 	perf.gpu_temp = 0;
 }
 
-FALLBACK_IMPLEMENTATION void PLAT_getGPUSpeed()
+FALLBACK_IMPLEMENTATION void PLAT_getGPUStats(void)
 {
 	perf.gpu_speed = 0;
-}
-
-FALLBACK_IMPLEMENTATION void PLAT_getGPUUsage()
-{
-	perf.gpu_usage = 0.0;
+	perf.gpu_usage = -1;
 }
 
 int GFX_loadSystemFont(const char *fontPath)
@@ -942,8 +945,8 @@ void GFX_flip_fixed_rate(SDL_Surface *screen, double target_fps)
 
 			// The OS scheduling algorithm cannot guarantee that
 			// the sleep will last the exact amount of requested time.
-			// We sleep as much as we can using the OS primitive.
-			const useconds_t min_waiting_time = 2000;
+			// Sleep as much as we can and keep only a short spin tail.
+			const useconds_t min_waiting_time = 300;
 			if (time_to_sleep_us > min_waiting_time)
 			{
 				usleep(time_to_sleep_us - min_waiting_time);
@@ -2744,15 +2747,16 @@ static void SND_resizeBuffer(void)
 	SDL_UnlockAudio();
 #endif
 }
-static int soundQuality = 2;
+static int soundQuality = SND_QUALITY_CUBIC;
 static int resetSrcState = 0;
+
 void SND_setQuality(int quality)
 {
 	LOG_info("Set sound quality\n");
 	soundQuality = qualityLevels[quality];
 	resetSrcState = 1;
 }
-ResampledFrames resample_audio(const SND_Frame *input_frames,
+static ResampledFrames resample_audio(const SND_Frame *input_frames,
 							   int input_frame_count, int input_sample_rate,
 							   int output_sample_rate, double ratio)
 {
@@ -2763,9 +2767,20 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 
 	double final_ratio = ((double)output_sample_rate / input_sample_rate) * ratio;
 
-	if (!src_state || resetSrcState)
+	if (resetSrcState)
 	{
 		resetSrcState = 0;
+		if (src_state)
+			src_delete(src_state);
+		src_state = NULL;
+		cubic_resampler_reset();
+	}
+
+	if (soundQuality == SND_QUALITY_CUBIC)
+		return cubic_resampler_process(input_frames, input_frame_count, input_sample_rate, output_sample_rate, final_ratio);
+
+	if (!src_state)
+	{
 		src_state = src_new(soundQuality, 2, &error);
 		if (src_state == NULL)
 		{
@@ -2824,7 +2839,7 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 
 	int output_frame_count = src_data.output_frames_gen;
 
-	SND_Frame *output_frames = (SND_Frame *)malloc(output_frame_count * sizeof(SND_Frame));
+	SND_Frame *output_frames = (SND_Frame *)malloc((output_frame_count ? output_frame_count : 1) * sizeof(SND_Frame));
 	if (!output_frames)
 	{
 		fprintf(stderr, "Error allocating output frames\n");
@@ -2851,6 +2866,7 @@ ResampledFrames resample_audio(const SND_Frame *input_frames,
 	ResampledFrames resampled;
 	resampled.frames = output_frames;
 	resampled.frame_count = output_frame_count;
+	resampled.input_used = src_data.input_frames_used;
 
 	return resampled;
 }
@@ -2913,15 +2929,36 @@ float calculateBufferAdjustment(float remaining_space, float targetbuffer_over, 
 	return rolling_average;
 }
 
-static SND_Frame tmpbuffer[BATCH_SIZE];
-static SND_Frame *unwritten_frames = NULL;
-static int unwritten_frame_count = 0;
+static size_t mix_available(const SND_Frame *frames, size_t count, int free_slots, double ratio)
+{
+	// The audio callback can only increase the space in this snapshot. Leave one ring slot empty.
+	int space = free_slots - 1;
+	double output_per_input = ratio * snd.sample_rate_out / snd.sample_rate_in;
+	size_t used = 0;
+	while (used < count && space > 1)
+	{
+		int amount = MIN(count - used, BATCH_SIZE);
+		if (amount * output_per_input + 1 > space)
+			amount = (int)((space - 1) / output_per_input);
+		if (!amount) break;
+		ResampledFrames chunk = resample_audio(frames + used, amount, snd.sample_rate_in, snd.sample_rate_out, ratio);
+		pthread_mutex_lock(&audio_mutex);
+		for (int i = 0; i < chunk.frame_count; i++) {
+			snd.buffer[snd.frame_in] = chunk.frames[i];
+			snd.frame_in = (snd.frame_in + 1) % snd.frame_count;
+		}
+		pthread_mutex_unlock(&audio_mutex);
+		free(chunk.frames);
+		space -= chunk.frame_count;
+		used += chunk.input_used;
+		if (!chunk.frame_count && !chunk.input_used) break;
+	}
+	return used;
+}
 
 size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 {
-	int framecount = (int)frame_count;
-	int consumed = 0;
-	int total_consumed_frames = 0;
+	if (!snd.initialized) return 0;
 	double ratio = 1.0;
 
 	if (snd.frame_count <= 0)
@@ -3004,42 +3041,7 @@ size_t SND_batchSamples(const SND_Frame *frames, size_t frame_count)
 
 	perf.ratio = (ratio > 0.0) ? ratio : current_fps;
 
-	while (framecount > 0)
-	{
-		int amount = MIN(BATCH_SIZE, framecount);
-
-		// Copy frames to tmpbuffer for resampling
-		for (int i = 0; i < amount; i++)
-		{
-			tmpbuffer[i] = frames[consumed + i];
-		}
-		consumed += amount;
-		framecount -= amount;
-
-		ResampledFrames resampled = resample_audio(
-			tmpbuffer, amount, snd.sample_rate_in, snd.sample_rate_out, ratio);
-
-		int written_frames = 0;
-		pthread_mutex_lock(&audio_mutex);
-		for (int i = 0; i < resampled.frame_count; i++)
-		{
-			// Check if buffer full (leave one slot free)
-			if ((snd.frame_in + 1) % snd.frame_count == snd.frame_out)
-			{
-				// Buffer full, break early
-				break;
-			}
-			snd.buffer[snd.frame_in] = resampled.frames[i];
-			snd.frame_in = (snd.frame_in + 1) % snd.frame_count;
-			written_frames++;
-		}
-		pthread_mutex_unlock(&audio_mutex);
-
-		total_consumed_frames += written_frames;
-		free(resampled.frames);
-	}
-
-	return total_consumed_frames;
+	return mix_available(frames, frame_count, remaining_space, ratio);
 }
 
 enum
@@ -3051,13 +3053,11 @@ enum
 
 size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 {
+	if (!snd.initialized) return 0;
 	static int current_mode = SND_FF_ON_TIME;
 	double ratio = 1.0;
 
-	int framecount = (int)frame_count;
 
-	int consumed = 0;
-	int total_consumed_frames = 0;
 
 	// printf("received %d audio frames\n", frame_count);
 
@@ -3131,43 +3131,7 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame *frames, size_t frame_count)
 	}
 	perf.ratio = ratio;
 
-	while (framecount > 0)
-	{
-
-		int amount = MIN(BATCH_SIZE, framecount);
-
-		for (int i = 0; i < amount; i++)
-		{
-			tmpbuffer[i] = frames[consumed + i];
-		}
-		consumed += amount;
-		framecount -= amount;
-
-		ResampledFrames resampled = resample_audio(
-			tmpbuffer, amount, snd.sample_rate_in, snd.sample_rate_out, ratio);
-
-		// Write resampled frames to the buffer
-		int written_frames = 0;
-
-		pthread_mutex_lock(&audio_mutex);
-		for (int i = 0; i < resampled.frame_count; i++)
-		{
-			if ((snd.frame_in + 1) % snd.frame_count == snd.frame_out)
-			{
-				// Buffer is full, break. This should never happen tho, but just to be safe
-				break;
-			}
-			snd.buffer[snd.frame_in] = resampled.frames[i];
-			snd.frame_in = (snd.frame_in + 1) % snd.frame_count;
-			written_frames++;
-		}
-		pthread_mutex_unlock(&audio_mutex);
-
-		total_consumed_frames += written_frames;
-		free(resampled.frames);
-	}
-
-	return total_consumed_frames;
+	return mix_available(frames, frame_count, remaining_space, ratio);
 }
 
 void SND_init(double sample_rate, double frame_rate)
@@ -3232,6 +3196,7 @@ void SND_init(double sample_rate, double frame_rate)
 
 	snd.frame_count = ((float)spec_out.freq / SCREEN_FPS) * 8; // buffer size based on sample rate out (times 12 samples headroom)
 	perf.buffer_size = snd.frame_count;
+	resetSrcState = 1;
 	snd.sample_rate_in = sample_rate;
 	snd.sample_rate_out = spec_out.freq;
 	perf.samplerate_in = snd.sample_rate_in;
@@ -3953,15 +3918,27 @@ static struct VIB_Context
 {
 	int initialized;
 	pthread_t pt;
+	pthread_mutex_t lock;
+	pthread_cond_t changed;
 	int queued_strength;
 	int strength;
-} vib = {0};
+} vib = {.lock = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
+static void VIB_unlock(void *arg)
+{
+	pthread_mutex_unlock(&vib.lock);
+}
 static void *VIB_thread(void *arg)
 {
 #define DEFER_FRAMES 3
 	static int defer = 0;
 	while (1)
 	{
+		pthread_mutex_lock(&vib.lock);
+		pthread_cleanup_push(VIB_unlock, NULL);
+		while (vib.queued_strength == vib.strength)
+			pthread_cond_wait(&vib.changed, &vib.lock);
+		pthread_cleanup_pop(1);
+
 		SDL_Delay(17);
 		if (vib.queued_strength != vib.strength)
 		{
@@ -3997,7 +3974,10 @@ void VIB_setStrength(int strength)
 {
 	if (vib.queued_strength == strength)
 		return;
+	pthread_mutex_lock(&vib.lock);
 	vib.queued_strength = strength;
+	pthread_cond_signal(&vib.changed);
+	pthread_mutex_unlock(&vib.lock);
 }
 int VIB_getStrength(void)
 {
@@ -4415,9 +4395,9 @@ static void PWR_waitForWake(void)
 			pwr.requested_wake = 0;
 			break;
 		}
+		SDL_Delay(200);
 		if (sleepDelay > 0)
 		{
-			SDL_Delay(200);
 			if (SDL_GetTicks() - sleep_ticks >= sleepDelay)
 			{ // increased to two minutes
 				if (SDL_AtomicGet(&pwr.is_charging) ||
@@ -4433,6 +4413,10 @@ static void PWR_waitForWake(void)
 					{
 						return;
 					}
+					else if (ret == PWR_DEEPSLEEP_POWEROFF)
+					{
+						LOG_info("power off timeout expired while suspended - powering off\n");
+					}
 					else
 					{
 						LOG_warn("failed to enter deep sleep - powering off\n");
@@ -4440,6 +4424,11 @@ static void PWR_waitForWake(void)
 				}
 				if (pwr.can_poweroff)
 				{
+					// PWR_enterSleep() stopped the monitors. They handle
+					// PWR_powerOff()'s SIGTERM only after SIGCONT.
+					system("killall -CONT keymon.elf");
+					system("killall -CONT batmon.elf");
+					system("killall -CONT audiomon.elf");
 					PWR_powerOff(0);
 				}
 			}
@@ -4466,6 +4455,9 @@ void PWR_sleep(void)
 	pwr.resume_tick = SDL_GetTicks();
 }
 
+#define PWR_POWEROFF_SECS_ENV "NEXTUI_POWEROFF_SECS"
+#define PWR_SUSPEND_EXIT_POWEROFF 3
+
 int PWR_deepSleep(void)
 {
 	// Run `${BIN_PATH}/suspend` if it exists, then fall back
@@ -4473,12 +4465,23 @@ int PWR_deepSleep(void)
 	//
 	// We assume the suspend executable exits after a full
 	// suspend/resume cycle.
+	//
+	// Auto power off is the last step after screen off and suspend.
+	// Suspend-to-RAM stops our timers, so the suspend executable arms the RTC
+	// alarm for PWR_POWEROFF_SECS_ENV seconds. It exits with
+	// PWR_SUSPEND_EXIT_POWEROFF if the alarm ended the suspend.
 	char *suspend_path = BIN_PATH "/suspend";
 	if (exists(suspend_path))
 	{
 		LOG_info("suspending using platform suspend executable\n");
 
+		uint32_t poweroff_secs = pwr.can_poweroff ? CFG_getPowerOffTimeoutSecs() : 0;
+		char secs[16];
+		snprintf(secs, sizeof(secs), "%u", poweroff_secs);
+		setenv(PWR_POWEROFF_SECS_ENV, secs, 1);
+
 		int ret = system(suspend_path);
+		unsetenv(PWR_POWEROFF_SECS_ENV);
 		if (ret < 0)
 		{
 			LOG_error("failed to launch suspend executable: %d\n", errno);
@@ -4486,6 +4489,8 @@ int PWR_deepSleep(void)
 		}
 
 		LOG_info("suspend executable exited with %d\n", ret);
+		if (poweroff_secs > 0 && WIFEXITED(ret) && WEXITSTATUS(ret) == PWR_SUSPEND_EXIT_POWEROFF)
+			return PWR_DEEPSLEEP_POWEROFF;
 		return ret == 0 ? 0 : -1;
 	}
 

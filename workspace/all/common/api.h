@@ -92,8 +92,8 @@ typedef struct {
     int cpu_speed;
     double cpu_usage;
     int cpu_temp;
-	int gpu_speed;
-	double gpu_usage;
+    int gpu_speed; // MHz, 0 if unavailable
+    double gpu_usage; // percent, -1 if unavailable
     int gpu_temp;
     double jitter;
     int frame_drops;
@@ -461,6 +461,7 @@ typedef struct SND_Frame {
 typedef struct {
 	SND_Frame* frames;
 	int frame_count;
+	int input_used;
 } ResampledFrames;
 
 void SND_init(double sample_rate, double frame_rate);
@@ -499,8 +500,7 @@ void PLAT_initLid(void);
 int PLAT_lidChanged(int* state);
 void PLAT_getCPUTemp();
 void PLAT_getCPUSpeed();
-void PLAT_getGPUUsage();
-void PLAT_getGPUSpeed();
+void PLAT_getGPUStats(void);
 void PLAT_getGPUTemp();
 ///////////////////////////////
 
@@ -575,6 +575,9 @@ void PWR_powerOff(int reboot);
 int PWR_isPoweringOff(void);
 
 void PWR_sleep(void);
+// Returns 0 after a normal resume, -1 if the suspend failed, and
+// PWR_DEEPSLEEP_POWEROFF if the power off timeout expired during the suspend.
+#define PWR_DEEPSLEEP_POWEROFF 1
 int PWR_deepSleep(void);
 
 void PWR_requestSleep(void);

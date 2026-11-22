@@ -15,6 +15,8 @@
 #include "ra_integration.h"
 #include "ra_badges.h"
 #include "ma_internal.h"
+#include "ma_audio.h"
+#include "ma_core.h"
 #include "ma_cheats.h"
 #include "ma_saves.h"
 #include "ma_game.h"
@@ -222,10 +224,14 @@ void Menu_quit(void) {
 	SDL_FreeSurface(menu.overlay);
 }
 void Menu_beforeSleep() {
+	Audio_discard();
 	SRAM_write();
 	RTC_write();
-	State_autosave();
-	putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
+	// Without a new state, the next boot would resume a stale one.
+	if (State_autosave())
+		putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
+	else
+		unlink(AUTO_RESUME_PATH);
 }
 void Menu_afterSleep() {
 	unlink(AUTO_RESUME_PATH);
@@ -1909,7 +1915,7 @@ void Menu_loop(void) {
 				break;
 				case ITEM_OPTS: {
 					if (simple_mode) {
-						core.reset();
+						Core_reset();
 						status = STATUS_RESET;
 						show_menu = 0;
 					}

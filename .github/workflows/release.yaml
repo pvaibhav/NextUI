@@ -1,67 +1,71 @@
 ---
-name: Release NextUI
+name: Release NextUI fork
 
 # yamllint disable-line rule:truthy
 on:
+  push:
+    tags:
+      - 'v*-pvaibhav.*'
   workflow_dispatch:
     inputs:
-      release_type:
-        description: "release type"
-        default: "patch"
+      version:
+        description: Version tag to build without publishing
         required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
+        type: string
+      core_run_id:
+        description: Optional successful run to reuse unchanged cores for this build-only candidate
+        required: false
+        type: string
 
 permissions:
-  attestations: write
-  contents: write
-  id-token: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.version || github.ref_name }}
     outputs:
-      next-tag: ${{ steps.next-tag.outputs.version }}
-      release-name: ${{ steps.release-name.outputs.RELEASE_NAME }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      release-name: ${{ steps.metadata.outputs.release-name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Generate Release Name
-        id: release-name
-        run: |
-          echo "RELEASE_NAME=$(make name)" >> "$GITHUB_OUTPUT"
+      - name: Check release tag validation
+        run: bash .github/scripts/test-release-metadata.sh
 
-      - name: Get Latest Tag
-        id: latest-tag
-        run: |
-          echo GIT_LATEST_TAG="$(git describe --tags "$(git rev-list --tags --max-count=1)")" >>"$GITHUB_OUTPUT"
+      - name: Check display calibration profiles and parser
+        run: python3 .github/scripts/test-displaycal.py
 
-      - name: Compute Next Tag
-        id: next-tag
-        uses: docker://ghcr.io/dokku/semver-generator:latest
-        with:
-          bump: ${{ github.event.inputs.release_type }}
-          input: ${{ steps.latest-tag.outputs.GIT_LATEST_TAG }}
+      - name: Prepare tagged release
+        id: metadata
+        run: bash .github/scripts/release-metadata.sh "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check release notes version
+        run: test "$(head -n 1 RELEASE_NOTES.md)" = "# $RELEASE_TAG"
+
+      - name: Validate candidate core reuse
+        if: inputs.core_run_id != ''
+        run: bash .github/scripts/validate-core-reuse.sh
+        env:
+          CORE_RUN_ID: ${{ inputs.core_run_id }}
+          GH_TOKEN: ${{ github.token }}
 
   core-matrix:
+    needs: prepare
     runs-on: ubuntu-24.04-arm
-    env:
-      PLATFORM: ${{ matrix.toolchain }}
     outputs:
-      cores: ${{ steps.cores.outputs.cores }}
-    strategy:
-      fail-fast: true
-      matrix:
-        toolchain:
-          - tg5040
-          - tg5050
-          - h700
+      matrix: ${{ steps.cores.outputs.matrix }}
 
     steps:
       - name: Checkout
@@ -70,22 +74,23 @@ jobs:
       - name: Generate cores matrix
         id: cores
         run: |
-          CORES="$(make cores-json)"
-          echo "cores=$CORES" >> $GITHUB_OUTPUT
+          matrix='{"include":[]}'
+          for toolchain in tg5040 tg5050 h700; do
+            cores="$(PLATFORM="$toolchain" make cores-json)"
+            matrix="$(jq -c --arg toolchain "$toolchain" --argjson cores "$cores" \
+              '.include += [$cores[] | {toolchain: $toolchain, core: .}]' <<< "$matrix")"
+          done
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build-core:
+    if: github.event_name != 'workflow_dispatch' || inputs.core_run_id == ''
     needs: core-matrix
     runs-on: ubuntu-24.04-arm
     env:
       PLATFORM: ${{ matrix.toolchain }}
     strategy:
       fail-fast: true
-      matrix:
-        toolchain:
-          - tg5040
-          - tg5050
-          - h700
-        core: ${{ fromJson(needs.core-matrix.outputs.cores) }}
+      matrix: ${{ fromJson(needs.core-matrix.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -101,14 +106,66 @@ jobs:
         with:
           name: core-${{ matrix.toolchain }}-${{ matrix.core }}.zip
           path: workspace/${{ env.PLATFORM }}/cores/output/
+          if-no-files-found: error
+
+  build-updater:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout fork updater
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: pvaibhav/nextui-updater-pak
+          ref: 88e1fc4fdcb8595e4e66b1863f0123c80fc5dceb
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Rust 1.100's Cargo layout breaks the bundled SDL2 build script.
+          toolchain: 1.99.1
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Test package isolation and launcher
+        run: python3 scripts/test_package.py
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Test firmware release selection
+        run: cargo test --locked
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git --locked
+
+      - name: Build updater
+        run: cross build --locked --release --target=aarch64-unknown-linux-gnu
+
+      - name: Package updater
+        run: bash scripts/create_pak.sh
+
+      - name: Upload updater
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nextui.updater.pakz
+          path: nextui.updater.pakz
+          if-no-files-found: error
 
   build:
+    if: ${{ !cancelled() && !failure() }}
     needs:
       - prepare
       - build-core
+      - build-updater
     runs-on: ubuntu-24.04-arm
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
     env:
       RELEASE_NAME: ${{ needs.prepare.outputs.release-name }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.tag }}
+      UPDATER_PAK_URL: file://${{ github.workspace }}/updater/nextui.updater.pakz
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -127,6 +184,8 @@ jobs:
           path: workspace/tg5040/cores/output/
           pattern: core-tg5040-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (tg5040)
         run: make tg5040
@@ -139,6 +198,8 @@ jobs:
           path: workspace/tg5050/cores/output/
           pattern: core-tg5050-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (tg5050)
         run: make tg5050
@@ -151,6 +212,8 @@ jobs:
           path: workspace/h700/cores/output/
           pattern: core-h700-*
           merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
 
       - name: Build (h700)
         run: make h700
@@ -160,6 +223,15 @@ jobs:
       - name: Special
         run: make special
 
+      - name: Download fork updater
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: nextui.updater.pakz
+          path: updater/
+
+      - name: Verify fork updater package
+        run: python3 .github/scripts/verify-updater.py updater/nextui.updater.pakz
+
       - name: Package
         run: make package
 
@@ -168,28 +240,24 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}-all.zip
           path: releases/${{ env.RELEASE_NAME }}-all.zip
+          if-no-files-found: error
 
       - name: Upload Base
         uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ env.RELEASE_NAME }}-base.zip
           path: releases/${{ env.RELEASE_NAME }}-base.zip
+          if-no-files-found: error
 
       - name: Upload Extras
         uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ env.RELEASE_NAME }}-extras.zip
           path: releases/${{ env.RELEASE_NAME }}-extras.zip
-
-      - name: Skip Attest for PRs from forks
-        id: skip
-        if: github.ref != 'refs/heads/main'
-        run: |
-          echo '::warning title=Attest skipped::Attest action requires permissions and is performed only for main branch.'
+          if-no-files-found: error
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v4.2.2
-        if: github.ref == 'refs/heads/main'
         with:
           subject-path: |
             releases/${{ env.RELEASE_NAME }}-all.zip
@@ -197,10 +265,13 @@ jobs:
             releases/${{ env.RELEASE_NAME }}-extras.zip
 
   release:
+    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - prepare
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -211,31 +282,21 @@ jobs:
         uses: actions/download-artifact@v8.0.2
         with:
           path: releases/
-          pattern: NextUI-*
+          pattern: ${{ needs.prepare.outputs.release-name }}-*
           merge-multiple: true
 
-      - name: Create and Push Tag
-        run: |
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          git tag "$GIT_NEXT_TAG"
-          git push origin "$GIT_NEXT_TAG"
-        env:
-          GIT_NEXT_TAG: ${{ needs.prepare.outputs.next-tag }}
+      - name: Prepare release description
+        run: tail -n +3 RELEASE_NOTES.md > release-notes.md
 
       - name: Release
         uses: softprops/action-gh-release@v3
         with:
-          files: releases/*
-          generate_release_notes: true
-          append_body: true
-          tag_name: ${{ needs.prepare.outputs.next-tag }}
+          files: |
+            releases/${{ needs.prepare.outputs.release-name }}-all.zip
+            releases/${{ needs.prepare.outputs.release-name }}-base.zip
+            releases/${{ needs.prepare.outputs.release-name }}-extras.zip
+          fail_on_unmatched_files: true
+          body_path: release-notes.md
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          prerelease: false
           make_latest: "true"
-          body: |
-            
-            For full features list and help on how to use etc of NextUI:
-            https://nextui.loveretro.games/docs/
-
-            ## How to install/update
-            For a fresh installation, follow the instructions here: https://nextui.loveretro.games/getting-started/installation/
-            When updating from a previous release: https://nextui.loveretro.games/getting-started/updating/

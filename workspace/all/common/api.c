@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 
 #include "utils.h"
@@ -358,14 +359,10 @@ FALLBACK_IMPLEMENTATION void PLAT_getGPUTemp()
 	perf.gpu_temp = 0;
 }
 
-FALLBACK_IMPLEMENTATION void PLAT_getGPUSpeed()
+FALLBACK_IMPLEMENTATION void PLAT_getGPUStats(void)
 {
 	perf.gpu_speed = 0;
-}
-
-FALLBACK_IMPLEMENTATION void PLAT_getGPUUsage()
-{
-	perf.gpu_usage = 0.0;
+	perf.gpu_usage = -1;
 }
 
 int GFX_loadSystemFont(const char *fontPath)
@@ -948,8 +945,8 @@ void GFX_flip_fixed_rate(SDL_Surface *screen, double target_fps)
 
 			// The OS scheduling algorithm cannot guarantee that
 			// the sleep will last the exact amount of requested time.
-			// We sleep as much as we can using the OS primitive.
-			const useconds_t min_waiting_time = 2000;
+			// Sleep as much as we can and keep only a short spin tail.
+			const useconds_t min_waiting_time = 300;
 			if (time_to_sleep_us > min_waiting_time)
 			{
 				usleep(time_to_sleep_us - min_waiting_time);
@@ -3921,15 +3918,27 @@ static struct VIB_Context
 {
 	int initialized;
 	pthread_t pt;
+	pthread_mutex_t lock;
+	pthread_cond_t changed;
 	int queued_strength;
 	int strength;
-} vib = {0};
+} vib = {.lock = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
+static void VIB_unlock(void *arg)
+{
+	pthread_mutex_unlock(&vib.lock);
+}
 static void *VIB_thread(void *arg)
 {
 #define DEFER_FRAMES 3
 	static int defer = 0;
 	while (1)
 	{
+		pthread_mutex_lock(&vib.lock);
+		pthread_cleanup_push(VIB_unlock, NULL);
+		while (vib.queued_strength == vib.strength)
+			pthread_cond_wait(&vib.changed, &vib.lock);
+		pthread_cleanup_pop(1);
+
 		SDL_Delay(17);
 		if (vib.queued_strength != vib.strength)
 		{
@@ -3965,7 +3974,10 @@ void VIB_setStrength(int strength)
 {
 	if (vib.queued_strength == strength)
 		return;
+	pthread_mutex_lock(&vib.lock);
 	vib.queued_strength = strength;
+	pthread_cond_signal(&vib.changed);
+	pthread_mutex_unlock(&vib.lock);
 }
 int VIB_getStrength(void)
 {
@@ -4383,9 +4395,9 @@ static void PWR_waitForWake(void)
 			pwr.requested_wake = 0;
 			break;
 		}
+		SDL_Delay(200);
 		if (sleepDelay > 0)
 		{
-			SDL_Delay(200);
 			if (SDL_GetTicks() - sleep_ticks >= sleepDelay)
 			{ // increased to two minutes
 				if (SDL_AtomicGet(&pwr.is_charging) ||
@@ -4401,6 +4413,10 @@ static void PWR_waitForWake(void)
 					{
 						return;
 					}
+					else if (ret == PWR_DEEPSLEEP_POWEROFF)
+					{
+						LOG_info("power off timeout expired while suspended - powering off\n");
+					}
 					else
 					{
 						LOG_warn("failed to enter deep sleep - powering off\n");
@@ -4408,6 +4424,11 @@ static void PWR_waitForWake(void)
 				}
 				if (pwr.can_poweroff)
 				{
+					// PWR_enterSleep() stopped the monitors. They handle
+					// PWR_powerOff()'s SIGTERM only after SIGCONT.
+					system("killall -CONT keymon.elf");
+					system("killall -CONT batmon.elf");
+					system("killall -CONT audiomon.elf");
 					PWR_powerOff(0);
 				}
 			}
@@ -4434,6 +4455,9 @@ void PWR_sleep(void)
 	pwr.resume_tick = SDL_GetTicks();
 }
 
+#define PWR_POWEROFF_SECS_ENV "NEXTUI_POWEROFF_SECS"
+#define PWR_SUSPEND_EXIT_POWEROFF 3
+
 int PWR_deepSleep(void)
 {
 	// Run `${BIN_PATH}/suspend` if it exists, then fall back
@@ -4441,12 +4465,23 @@ int PWR_deepSleep(void)
 	//
 	// We assume the suspend executable exits after a full
 	// suspend/resume cycle.
+	//
+	// Auto power off is the last step after screen off and suspend.
+	// Suspend-to-RAM stops our timers, so the suspend executable arms the RTC
+	// alarm for PWR_POWEROFF_SECS_ENV seconds. It exits with
+	// PWR_SUSPEND_EXIT_POWEROFF if the alarm ended the suspend.
 	char *suspend_path = BIN_PATH "/suspend";
 	if (exists(suspend_path))
 	{
 		LOG_info("suspending using platform suspend executable\n");
 
+		uint32_t poweroff_secs = pwr.can_poweroff ? CFG_getPowerOffTimeoutSecs() : 0;
+		char secs[16];
+		snprintf(secs, sizeof(secs), "%u", poweroff_secs);
+		setenv(PWR_POWEROFF_SECS_ENV, secs, 1);
+
 		int ret = system(suspend_path);
+		unsetenv(PWR_POWEROFF_SECS_ENV);
 		if (ret < 0)
 		{
 			LOG_error("failed to launch suspend executable: %d\n", errno);
@@ -4454,6 +4489,8 @@ int PWR_deepSleep(void)
 		}
 
 		LOG_info("suspend executable exited with %d\n", ret);
+		if (poweroff_secs > 0 && WIFEXITED(ret) && WEXITSTATUS(ret) == PWR_SUSPEND_EXIT_POWEROFF)
+			return PWR_DEEPSLEEP_POWEROFF;
 		return ret == 0 ? 0 : -1;
 	}
 

@@ -135,7 +135,23 @@ static const std::vector<std::string> screen_timeout_labels = {"Never", "5s", "1
 static const std::vector<std::any>    sleep_timeout_secs = {5U, 10U, 15U, 30U, 45U, 60U, 90U, 120U, 240U, 360U, 600U};
 static const std::vector<std::string> sleep_timeout_labels = {"5s", "10s", "15s", "30s", "45s", "60s", "90s", "2m", "4m", "6m", "10m"};
 
+static const std::vector<std::any>    poweroff_timeout_secs = {0U, 120U, 300U, 600U, 900U, 1800U, 3600U, 7200U, 14400U, 28800U, 43200U, 86400U};
+static const std::vector<std::string> poweroff_timeout_labels = {"Never", "2m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "24h"};
+
 static const std::vector<std::string> on_off = {"Off", "On"};
+
+static const std::vector<std::any> colour_correction_modes = {(int)DISPLAYCAL_MODE_OFF, (int)DISPLAYCAL_MODE_ON, (int)DISPLAYCAL_MODE_CUSTOM};
+static const std::vector<std::string> colour_correction_labels = {"Off", "On", "Custom"};
+
+// Gains only take effect in Custom mode, so editing a slider while On moves
+// there first, keeping edits live. Reset paths call the setters directly
+// and are unaffected.
+static void switchDisplayCalToCustom(MenuItem *modeItem) {
+    if (GetDisplayCalMode() == DISPLAYCAL_MODE_ON) {
+        SetDisplayCalMode(DISPLAYCAL_MODE_CUSTOM);
+        modeItem->reselect();
+    }
+}
 
 static const std::vector<std::string> scaling_strings = {"Fullscreen", "Fit", "Fill"};
 static const std::vector<std::any> scaling = {(int)GFX_SCALE_FULLSCREEN, (int)GFX_SCALE_FIT, (int)GFX_SCALE_FILL};
@@ -612,25 +628,26 @@ int main(int argc, char *argv[])
                 deviceInfo.getModel() == DeviceInfo::RG40XXV ? DISPLAYCAL_PRESET_RG40XXV :
                 deviceInfo.getModel() == DeviceInfo::RGCubeXX ? DISPLAYCAL_PRESET_RGCUBEXX :
                 DISPLAYCAL_PRESET_DEFAULT);
+            auto colourCorrectionItem =
+                new MenuItem{ListItemType::Generic, "Colour correction", "Corrects the display colours to better match the \nsRGB standard, at the expense of some peak brightness.", colour_correction_modes, colour_correction_labels, []() -> std::any
+                { return GetDisplayCalMode(); }, [](const std::any &value)
+                { SetDisplayCalMode(std::any_cast<int>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalMode(defaultDisplayCal.mode); }};
+            displayItems.push_back(colourCorrectionItem);
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "White point correction", "Corrects the display white point to better match the \nsRGB standard, at the expense of some peak brightness.", {false, true}, on_off, []() -> std::any
-                { return GetDisplayCalEnabled() != 0; }, [](const std::any &value)
-                { SetDisplayCalEnabled(std::any_cast<bool>(value)); },
-                [defaultDisplayCal]() { SetDisplayCalEnabled(defaultDisplayCal.enabled); }});
-            displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Red gain", "White point correction red channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalRedGain(); }, [](const std::any &value)
-                { SetDisplayCalRedGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Red gain", "Red level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalRedGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalRedGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalRedGain(defaultDisplayCal.red_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Green gain", "White point correction green channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalGreenGain(); }, [](const std::any &value)
-                { SetDisplayCalGreenGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Green gain", "Green level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalGreenGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalGreenGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalGreenGain(defaultDisplayCal.green_gain); }});
             displayItems.push_back(
-                new MenuItem{ListItemType::Generic, "Blue gain", "White point correction blue channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
-                { return GetDisplayCalBlueGain(); }, [](const std::any &value)
-                { SetDisplayCalBlueGain(std::any_cast<int>(value)); },
+                new MenuItem{ListItemType::Generic, "Blue gain", "Blue level for Custom mode (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalBlueGain(); }, [colourCorrectionItem](const std::any &value)
+                { switchDisplayCalToCustom(colourCorrectionItem); SetDisplayCalBlueGain(std::any_cast<int>(value)); },
                 [defaultDisplayCal]() { SetDisplayCalBlueGain(defaultDisplayCal.blue_gain); }});
         }
         displayItems.push_back(
@@ -653,6 +670,10 @@ int main(int argc, char *argv[])
             { return CFG_getSuspendTimeoutSecs(); }, [](const std::any &value)
             { CFG_setSuspendTimeoutSecs(std::any_cast<uint32_t>(value)); },
             []() { CFG_setSuspendTimeoutSecs(CFG_DEFAULT_SUSPENDTIMEOUTSECS);}},
+            new MenuItem{ListItemType::Generic, "Power off timeout", "Time the device sleeps before it powers off.\nA quicksaved game resumes on next boot.", poweroff_timeout_secs, poweroff_timeout_labels, []() -> std::any
+            { return CFG_getPowerOffTimeoutSecs(); }, [](const std::any &value)
+            { CFG_setPowerOffTimeoutSecs(std::any_cast<uint32_t>(value)); },
+            []() { CFG_setPowerOffTimeoutSecs(CFG_DEFAULT_POWEROFFTIMEOUTSECS);}},
             new MenuItem{ListItemType::Generic, "Haptic feedback", "Enable or disable haptic feedback on certain actions in the OS", {false, true}, on_off, []() -> std::any
             { return CFG_getHaptics(); }, [](const std::any &value)
             { CFG_setHaptics(std::any_cast<bool>(value)); },

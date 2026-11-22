@@ -243,18 +243,40 @@ bool PLAT_wifiConnected()
 		return false;
 	}
 
-	wifilog("PLAT_wifiConnected: Checking WiFi connection status...\n");
-	char output[256];
-	char cmd[128];
-	snprintf(cmd, sizeof(cmd), "%s status 2>/dev/null | grep '^wpa_state=' | cut -d= -f2", WPA_CLI_CMD);
-	if (wifi_run_cmd(cmd, output, sizeof(output)) != 0) {
-		return false;
+	char path[64];
+	snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", WIFI_INTERFACE);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		char state[16] = {0};
+		int ok = (fgets(state, sizeof(state), f) != NULL);
+		fclose(f);
+		if (ok) {
+			trimTrailingNewlines(state);
+			if (strcmp(state, "up") == 0)
+				return true;
+			if (strcmp(state, "unknown") != 0)
+				return false;
+		}
 	}
-	
-	trimTrailingNewlines(output);
-	wifilog("PLAT_wifiConnected: wifi state is %s\n", output);
-	
-	return strcmp(output, "COMPLETED") == 0;
+
+	// Fallback when operstate is unavailable or "unknown"
+	char status[2048];
+	char cmd[128];
+	snprintf(cmd, sizeof(cmd), "%s status 2>/dev/null", WPA_CLI_CMD);
+	if (wifi_run_cmd(cmd, status, sizeof(status)) == 0) {
+		const char *line = status;
+		while (*line) {
+			const char *nl = strchr(line, '\n');
+			size_t len = nl ? (size_t)(nl - line) : strlen(line);
+			while (len > 0 && line[len - 1] == '\r') len--;
+			if (len == 19 && strncmp(line, "wpa_state=COMPLETED", 19) == 0)
+				return true;
+			if (!nl) break;
+			line = nl + 1;
+		}
+	}
+
+	return false;
 }
 
 int PLAT_wifiConnection(struct WIFI_connection *connection_info)

@@ -7,3 +7,5 @@ size_t audio_sample_batch_callback(const int16_t *data, size_t frames);
 void Audio_init(void);
 void Audio_requestReset(void);
 void Audio_checkAndResetIfNeeded(void);
+void Audio_flush(void);
+void Audio_discard(void);

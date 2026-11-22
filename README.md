@@ -4,6 +4,60 @@
 
 </div>
 
+# NextUI: pvaibhav's experimental fork
+
+Anbernic H700 support has officially merged into NextUI and is included in [v6.15.0](https://github.com/LoveRetro/NextUI/releases/tag/v6.15.0).
+For stable builds on supported Anbernic and TrimUI devices, use the [official NextUI repository](https://github.com/LoveRetro/NextUI) and its [latest stable release](https://github.com/LoveRetro/NextUI/releases/latest).
+
+This repository is now my personal fork for experimental features and improvements before they are merged upstream.
+Releases from `pvaibhav` will combine upstream `main` with those changes.
+
+## Latest fork release
+
+[Download the latest fork release](https://github.com/pvaibhav/NextUI/releases/latest).
+On an existing fork install, open **Updater (pvaibhav)** and choose **Quick Update** for the firmware or **Full Update** to include Extras.
+
+See the [release notes](RELEASE_NOTES.md) for what to expect after updating.
+
+## Experimental features
+
+Included in this fork:
+
+- **Minarch performance optimisations.** `minarch`, the app that runs your games, uses less power during gameplay so your handheld can run cooler and last longer on a charge.
+- **LUT-based display calibration.** Per-device 1D lookup tables correct display colours towards sRGB.
+  Bundled profiles cover the TrimUI Brick Pro and Anbernic RG40XXV, RG34XXSP, and RGSP.
+  The **Colour correction** setting offers **Off**, **On**, and **Custom** modes, with manual red, green, and blue gains in Custom mode.
+- **Fork updater.** Launch **Updater (pvaibhav)** for this repository's `v<version>-pvaibhav.<revision>` releases.
+  Its separate tool folder protects it from Pak Store updates to the official updater.
+  Updater self-updates come from [my updater fork](https://github.com/pvaibhav/nextui-updater-pak).
+- **Power off timeout.** In Settings, set how long the device stays suspended before it shuts down.
+  If NextUI saved the game before shutdown, the game resumes on the next boot.
+- **DOSBox Pure.** Install Extras and put DOS games in `Roms/MS-DOS (DOS)`.
+  Press **MENU + L2** in a game to open the DOSBox menu.
+
+## Build and release this fork
+
+Tag the commit you want to release and push the tag to this repository.
+Replace the example version with the version you are publishing.
+
+```sh
+tag=v6.15.0-pvaibhav.4
+git tag -a "$tag" -m "NextUI $tag"
+git push origin "refs/tags/$tag"
+```
+
+Use `v<upstream-version>-pvaibhav.<revision>` and increment the revision for each release based on that upstream version.
+Write the changelog in [RELEASE_NOTES.md](RELEASE_NOTES.md), with `# <tag>` on the first line.
+The release workflow builds the tagged commit, including all emulator cores, for `tg5040`, `tg5050`, and `h700`.
+It also builds the updater from the source commit pinned in the workflow and bundles that package.
+It publishes a GitHub release marked **Latest**, with `NextUI-<tag>-all.zip`, `NextUI-<tag>-base.zip`, and `NextUI-<tag>-extras.zip`.
+Tags without the `-pvaibhav.<revision>` suffix do not trigger fork releases.
+
+To compile a candidate before tagging it, run **Release NextUI fork** manually in GitHub Actions and enter the planned version tag.
+Manual runs upload build artifacts without creating a tag or publishing a release.
+For packaging changes, `core_run_id` can reuse cores from a successful run after checking that their build inputs are unchanged.
+Tagged releases always rebuild all cores.
+
 <hr>
 
 <h4 align="center">
@@ -16,7 +70,7 @@
 
 <div align="center"><p>
     <a href="https://github.com/LoveRetro/NextUI/releases/latest">
-      <img alt="Latest release" src="https://img.shields.io/github/v/release/LoveRetro/NextUI?style=for-the-badge&logo=starship&include_prerelease=false&color=C9CBFF&logoColor=D9E0EE&labelColor=302D41&sort=semver" />
+      <img alt="Official stable release" src="https://img.shields.io/github/v/release/LoveRetro/NextUI?style=for-the-badge&logo=starship&include_prerelease=false&color=C9CBFF&logoColor=D9E0EE&labelColor=302D41&sort=semver" />
     </a>
     <a href="https://github.com/LoveRetro/NextUI/pulse">
       <img alt="Last commit" src="https://img.shields.io/github/last-commit/LoveRetro/NextUI?style=for-the-badge&logo=starship&color=8bd5ca&logoColor=D9E0EE&labelColor=302D41"/>
@@ -34,7 +88,7 @@
 
 ---
 
-A CFW based of MinUI with a rebuild emulation engine and tons of added features for the TrimUI Brick and Smart Pro. 
+NextUI is custom firmware based on MinUI, with a rebuilt emulation engine and added features for supported TrimUI and Anbernic H700 devices.
 
 For other devices we recommend checking out [MinUI](https://github.com/shauninman/MinUI)
 
@@ -48,7 +102,7 @@ See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full details.
 > has changed to PolyForm Noncommercial 1.0.0. The full transition history and rationale
 > is documented in [issue #765](https://github.com/LoveRetro/NextUI/issues/765).
 
-## Changes and additions
+## Features inherited from NextUI
 
 - Fixed both screen tearing and sync stutter problems of MinUI by rebuilding the emulator engine core
 - Game switcher menu (Onion OS style) by [@frysee](https://github.com/frysee)

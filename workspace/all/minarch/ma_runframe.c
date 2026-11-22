@@ -5,6 +5,7 @@
 #include "ma_input.h"
 #include "ma_config.h"
 #include "ma_runframe.h"
+#include "ma_audio.h"
 
 void chooseSyncRef(void) {
 	switch (sync_ref) {
@@ -59,6 +60,7 @@ void run_frame(void) {
 			rewinding = 1;
 			fast_forward = 0;
 			core.run();
+			Audio_flush();
 		}
 		else if (rewind_result == REWIND_STEP_CADENCE) {
 			// Waiting for cadence - don't run core, just re-render current frame
@@ -66,7 +68,8 @@ void run_frame(void) {
 			fast_forward = 0;
 			// Poll input manually since core.run() isn't called
 			input_poll_callback();
-			// Skip core.run() entirely to avoid advancing the game
+			// Yield briefly while waiting for the next rewind cadence tick
+			SDL_Delay(1);
 		}
 		else {
 			int hold_empty = rewind_ctx.enabled && rewind_pressed && !rewind_toggle;
@@ -75,6 +78,7 @@ void run_frame(void) {
 				rewinding = was_rewinding ? 1 : 0;
 				// Poll input manually so release is detected while core.run() is skipped
 				input_poll_callback();
+				GFX_delay();
 			} else {
 				// Buffer empty: auto untoggle rewind, resume FF if it was paused for a hold
 				if (rewind_toggle) rewind_toggle = 0;
@@ -88,6 +92,7 @@ void run_frame(void) {
 				}
 				rewinding = 0;
 				core.run();
+				Audio_flush();
 				Rewind_push(0);
 			}
 		}
@@ -102,6 +107,7 @@ void run_frame(void) {
 		}
 
 		core.run();
+		Audio_flush();
 		Rewind_push(0);
 	}
 
